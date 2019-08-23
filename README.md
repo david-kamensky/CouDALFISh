@@ -1,5 +1,7 @@
 # CouDALFISh
-**Cou**pling, via **D**ynamic **A**ugmented **L**agrangian (DAL), of **F**luids with **I**mmersed (alternatively: **I**sogeometric) **Sh**ells (pronounced "cuttlefish").  This module provides re-usable functionality for immersogeometric fluid--thin structure interaction analysis.  An isogeometric discretization of a thin shell, using [ShNAPr](https://github.com/david-kamensky/ShNAPr) is immersed into an unfitted finite element discretization of a fluid, using [FEniCS](https://fenicsproject.org/).  The two subproblems are coupled using the DAL approach, as originally proposed (without a name) in Section 4 of
+**Cou**pling, via **D**ynamic **A**ugmented **L**agrangian (DAL), of **F**luids with **I**mmersed (alternatively: **I**sogeometric) **Sh**ells (pronounced "cuttlefish").  This module provides re-usable functionality for immersogeometric fluid--thin structure interaction analysis.  An isogeometric discretization of a thin shell, using [ShNAPr](https://github.com/david-kamensky/ShNAPr) is immersed into an unfitted finite element discretization of a fluid, using [FEniCS](https://fenicsproject.org/).  Examples provided in this repository use [VarMINT](https://github.com/david-kamensky/VarMINT) to define the fluid formulation, but this is not strictly necessary.
+
+The two subproblems are coupled using the DAL approach, as originally proposed (without a name) in Section 4 of
 
   https://doi.org/10.1016/j.cma.2014.10.040
 
