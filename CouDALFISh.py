@@ -27,19 +27,39 @@ def stabScale(cutFunc,eps):
     """
     return conditional(gt(abs(cutFunc),0.0),eps,1.0)
 
-# TODO: Update code to use the midpoint rule for subproblems, and update
-# the multiplier between time step midpoints (which is a special case of
-# the generalized-alpha-based method from the original references).
-
 # Use these as free functions when defining the residual for a CouDALFISh,
 # to ensure consistency of time integration method.
-def xdot(x,x_old,Dt):
+dx_dx_alpha = 2.0
+def x_alpha(x,x_old):
+    """
+    The alpha-level state, as a function of ``x`` and ``x_old``.
+    """
+    return 0.5*(x + x_old)
+def xdot_alpha(x,x_old,Dt):
+    """
+    The alpha-level velocity, as a function of the current and previous
+    states ``x`` and ``x_old``, and the time step ``Dt``.
+    """
     iDt = Constant(1.0/Dt)
     return iDt*x - iDt*x_old
-
-def xddot(x,x_old,xdot_old,Dt):
+def xdot(x,x_old,xdot_old,Dt):
+    """
+    The (n+1)-level velocity, as a function of the (n+1)-level ``x``, 
+    the previous time step's state, ``x_old``, the previous time step's
+    velocity ``xdot_old``, and the time step ``Dt``.
+    """
+    # This must be recognizable to UFL as a "linear combination of Functions"
+    # for the purpose of updating old values stored as Functions.
+    a = Constant(2.0/Dt)
+    return a*x - a*x_old - xdot_old
+def xddot_alpha(x,x_old,xdot_old,Dt):
+    """
+    The alpha-level acceleration, as a function of the (n+1)-level ``x``,
+    the n-level ``x_old``, the n-level velocity, ``xdot_old``, and the
+    time step ``Dt``.
+    """
     iDt = Constant(1.0/Dt)
-    return iDt*xdot(x,x_old,Dt) - iDt*xdot_old
+    return 2.0*iDt*iDt*(x-x_old) - 2.0*iDt*xdot_old
 
 class CouDALFISh:
     """
@@ -92,6 +112,7 @@ class CouDALFISh:
         self.mesh_f = mesh_f
         self.up = up
         self.up_old = up_old
+        self.up_alpha = x_alpha(up,up_old)
         self.V_f = self.up.function_space()
         self.spline_sh = spline_sh
         self.penalty = penalty
@@ -119,8 +140,11 @@ class CouDALFISh:
         self.res_sh = res_sh
         self.y_hom = y_hom
         self.y_old_hom = y_old_hom
+        self.y_alpha_hom = x_alpha(y_hom,y_old_hom)
         self.ydot_old_hom = ydot_old_hom
-        self.ydot_hom = xdot(self.y_hom,self.y_old_hom,self.Dt)
+        self.ydot_hom = xdot(self.y_hom,self.y_old_hom,
+                             self.ydot_old_hom,self.Dt)
+        self.ydot_alpha_hom = xdot_alpha(self.y_hom,self.y_old_hom,self.Dt)
         if(Dres_sh==None):
             self.Dres_sh = derivative(res_sh,y_hom)
         else:
@@ -129,7 +153,8 @@ class CouDALFISh:
             self.Dres_f = derivative(res_f,up)
         else:
             self.Dres_f = Dres_f
-        self.x_sh = self.spline_sh.F + self.spline_sh.rationalize(self.y_hom)
+        self.x_sh = self.spline_sh.F \
+                    + self.spline_sh.rationalize(self.y_alpha_hom)
         
         if(cutFunc==None):
             self.Vscalar_f = FunctionSpace(mesh_f,"CG",1)
@@ -306,8 +331,9 @@ class CouDALFISh:
         self.y_hom.assign(self.y_old_hom + self.Dt*self.ydot_old_hom)
 
         # Explicit-in-geometry:
-        nodex = self.nodeX_sh \
-                + self.contactContext_sh.evalFunction(self.y_hom)
+        yFunc = Function(self.spline_sh.V)
+        yFunc.assign(self.y_alpha_hom)
+        nodex = self.nodeX_sh + self.contactContext_sh.evalFunction(yFunc)
         self.updateStabScale(nodex)
 
         # Block iteration:
@@ -319,9 +345,11 @@ class CouDALFISh:
             F_f = assemble(self.res_f)
 
             # Add fluid's FSI coupling terms
-            nodeu = self.evalFluidVelocities(self.up,nodex)
+            upFunc = Function(self.V_f)
+            upFunc.assign(self.up_alpha)
+            nodeu = self.evalFluidVelocities(upFunc,nodex)
             ydotFunc = Function(self.spline_sh.V)
-            ydotFunc.assign(self.ydot_hom)
+            ydotFunc.assign(self.ydot_alpha_hom)
             nodeydot = self.contactContext_sh.evalFunction(ydotFunc)
             self.updateNodalNormals()
             noden = self.contactContext_sh.evalFunction(self.n_nodal_sh)
@@ -349,12 +377,16 @@ class CouDALFISh:
             # Next, add on the contact contributions, assembled using the
             # function defined above.
             if(self.includeContact_sh):
-                Kc, Fc = self.contactContext_sh.assembleContact(self.y_hom)
+                yFunc = Function(self.spline_sh.V)
+                yFunc.assign(self.y_alpha_hom)
+                Kc, Fc = self.contactContext_sh.assembleContact(yFunc)
                 K_sh += Kc
                 F_sh += Fc
 
             # Add the structure's FSI coupling forces
-            nodeu = self.evalFluidVelocities(self.up,nodex)
+            upFunc = Function(self.V_f)
+            upFunc.assign(self.up_alpha)
+            nodeu = self.evalFluidVelocities(upFunc,nodex)
             self.addShellCouplingForces(nodeydot, nodeu, noden, K_sh, F_sh)
 
             # Apply the extraction to an IGA function space.  (This applies

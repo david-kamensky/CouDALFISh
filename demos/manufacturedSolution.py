@@ -276,20 +276,20 @@ def f_shell(X2):
 # Shell structure subproblem, using ShNAPr:
 y_hom = Function(spline.V)
 y_old_hom = Function(spline.V)
+y_alpha_hom = x_alpha(y_hom,y_old_hom)
 ydot_old_hom = Function(spline.V)
-ydot_hom = xdot(y_hom,y_old_hom,Dt)
 z_hom = TestFunction(spline.V)
 z = spline.rationalize(z_hom)
 
 X = spline.F
-x = X + spline.rationalize(y_hom)
+x = X + spline.rationalize(y_alpha_hom)
 Wint = surfaceEnergyDensitySVK(spline,X,x,E,nu,h_th,
                                membrane=True,
                                membranePrestress=prestress)*spline.dx
 
-yddot = spline.rationalize(xddot(y_hom,y_old_hom,ydot_old_hom,Dt))
+yddot = spline.rationalize(xddot_alpha(y_hom,y_old_hom,ydot_old_hom,Dt))
 res_sh = inner(rho0*h_th*yddot - f_shell(X[1]),z)*spline.dx \
-         + derivative(Wint,y_hom,z_hom)
+         + dx_dx_alpha*derivative(Wint,y_hom,z_hom)
 
 # Initial condition for shell:
 ydot_old_hom.assign(spline.project(u_left(X),rationalize=False))
@@ -304,11 +304,13 @@ ds = ds(metadata={"quadrature_degree":femQuadDeg})
 u,p = split(up)
 u_old,_ = split(up_old)
 v,q = split(vq)
-u_t = xdot(u,u_old,Dt)
+u_alpha = x_alpha(u,u_old)
+u_t_alpha = xdot_alpha(u,u_old,Dt)
 cutFunc = Function(Vscalar)
 f_f,_ = strongResidual(u_exact(x_f),p_exact(x_f),mu,rho,u_t=u_t_exact(x_f))
 f_f /= rho
-res_f = interiorResidual(u,p,v,q,rho,mu,mesh,u_t=u_t,Dt=Dt,dx=dx,f=f_f,
+res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,
+                         u_t=u_t_alpha,Dt=Dt,dx=dx,f=f_f,
                          stabScale=stabScale(cutFunc,stabEps))
 # Flag vertical sides for weakBCs:
 weakBCDomain = CompiledSubDomain("x[0]<0.0 || x[0]>"+str(L)
@@ -317,7 +319,8 @@ weakBCIndicator = MeshFunction("size_t",mesh,mesh.topology().dim()-1,0)
 WEAK_BC_FLAG = 1
 ds = ds(subdomain_data=weakBCIndicator)
 weakBCDomain.mark(weakBCIndicator,WEAK_BC_FLAG)
-res_f += weakDirichletBC(u,p,v,q,u_exact(x_f),rho,mu,mesh,ds=ds(WEAK_BC_FLAG))
+res_f += weakDirichletBC(u_alpha,p,v,q,u_exact(x_f),rho,mu,mesh,
+                         ds=ds(WEAK_BC_FLAG))
 
 # Slip BCs on top and bottom:
 bcs_f = [DirichletBC(V_f.sub(0).sub(d-1),Constant(0.0),
@@ -363,13 +366,12 @@ uFile = File("results/u.pvd")
 pFile = File("results/p.pvd")
 
 # Time stepping loop:
+t.t = 0.5*float(Dt)
+#t.t = float(Dt)
 for timeStep in range(0,N_steps):
     
-    t.t += float(Dt)
-
     if(mpirank==0):
-        print("------- Time step "+str(timeStep+1)+"/"+str(N_steps)
-              +" , t = "+str(t.t)+" -------")
+        print("------- Time step "+str(timeStep+1)+"/"+str(N_steps)+" -------")
 
     # Output fields needed for visualization.
     if(timeStep % OUTPUT_SKIP == 0):
@@ -403,9 +405,10 @@ for timeStep in range(0,N_steps):
 
     # Compute the time step for the coupled problem:
     fsiProblem.takeStep()
+    t.t += float(Dt)
 
 ####### Check errors #######
-
+t.t = T
 import math
 def L2Norm_f(u):
     return math.sqrt(assemble(inner(u,u)*dx))
