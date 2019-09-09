@@ -265,10 +265,6 @@ def f_shell(X2):
            - sqrt(g11(X2))*minusLam(X2)[0]
     f2 = -E*h_th/(1.0-nu*nu)*((V*t)**2)*Yp(X2)*Ypp(X2) \
          - sqrt(g11(X2))*minusLam(X2)[1]
-
-    #f1 = -sqrt(g11(X2))*minusLam(X2)[0]
-    #f2 = -sqrt(g11(X2))*minusLam(X2)[1]
-    
     return as_vector((f1,f2,0))
 
 ####### Formulations #######
@@ -367,7 +363,6 @@ pFile = File("results/p.pvd")
 
 # Time stepping loop:
 t.t = 0.5*float(Dt)
-#t.t = float(Dt)
 for timeStep in range(0,N_steps):
     
     if(mpirank==0):
@@ -417,8 +412,14 @@ def L2Norm_sh(u):
 eu = u - u_exact(x_f)
 ep = p - p_exact(x_f)
 ey = spline.rationalize(y_hom) - y_exact(X)
-print("L2 error in fluid velocity = "+str(L2Norm_f(eu)))
-print("H1 error in fluid velocity = "+str(L2Norm_f(grad(eu))))
-print("L2 error in fluid pressure = "+str(L2Norm_f(ep)))
-print("L2 error in shell displacement = "+str(L2Norm_sh(ey)))
-print("H1 error in shell displacement = "+str(L2Norm_sh(spline.grad(ey))))
+L2eu = L2Norm_f(eu)
+H1eu = L2Norm_f(grad(eu))
+L2ep = L2Norm_f(ep)
+L2ey = L2Norm_sh(ey)
+H1ey = L2Norm_sh(spline.grad(ey))
+if(mpirank==0):
+    print("L2 error in fluid velocity = "+str(L2eu))
+    print("H1 error in fluid velocity = "+str(H1eu))
+    print("L2 error in fluid pressure = "+str(L2ep))
+    print("L2 error in shell displacement = "+str(L2ey))
+    print("H1 error in shell displacement = "+str(H1ey))
