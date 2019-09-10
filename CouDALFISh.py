@@ -408,7 +408,7 @@ class CouDALFISh:
                 relNorm_sh = 0.0
 
             if(mpirank==0):
-                print("  ....... Block iteration "+str(blockIt)+" :")
+                print("  ....... Block iteration "+str(blockIt+1)+" :")
                 print("  ........... Shell relative res. = "+str(relNorm_sh))
                 print("  ........... Fluid relative res. = "+str(relNorm_f))
 
