@@ -97,7 +97,6 @@ blockItTol = float(args.blockItTol)
 
 # Derived parameters:
 Nel_f = 3*(2**(level))
-#N_steps = 16*Nel_f #2*Nel_f
 N_steps = 2*Nel_f
 Dt = Constant(T/N_steps)
 h_f = L/Nel_f
