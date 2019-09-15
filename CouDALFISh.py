@@ -95,9 +95,11 @@ class CouDALFISh:
         ``blockItTol`` and ``blockIts`` are the relative tolerance for
         block iteration and the maximum number of block iterations allowed,
         respectively.  ``bcs_f`` is a Python list of ``DirichletBC``s to be
-        applied to the fluid subproblem.  ``Dres_f`` and ``Dres_sh`` are 
-        custom tangent operators that may be specified for the fluid and
-        solid subproblems, defaulting to ``derivative``s of the corresponding
+        applied to the fluid subproblem; these BCs are assumed to be
+        homogeneous, although inhomogeneous BCs can be applied weakly.  
+        ``Dres_f`` and ``Dres_sh`` are custom tangent operators that 
+        may be specified for the fluid and solid subproblems, 
+        defaulting to ``derivative``s of the corresponding
         residuals.  ``contactContext_sh`` is a ``ShNAPr`` 
         ``ShellContactContext`` instance.  If it is left as the default
         ``None``, there will be no contact in the shell subproblem.  
