@@ -191,9 +191,6 @@ vq = TestFunction(V_f)
 # Define traction boundary condition at inflow:
 xSpatial = SpatialCoordinate(mesh)
 PRESSURE = Expression("((t<0.1)? 2e4 : -1e5)",t=0.0,degree=1)
-# Note: Because of errors in the projection of the mapping applied to the
-# mesh, the bottom may deviate by significantly more than DOLFIN_EPS from
-# its initial position.  That is why a full 0.1 is added.  
 inflowTraction = as_vector((0.0,0.0,PRESSURE))\
                  *conditional(lt(xSpatial[2],BOTTOM+0.1),
                               1.0,Constant(0.0))
@@ -256,7 +253,7 @@ contactContext_sh = ShellContactContext(spline,R_self,r_max,
                                         phiPrime,phiDoublePrime)
 
 # Linear solver settings for the fluid: The nonlinear solver typically
-# converges quite well, even if the fluid linear solver not to be converging.
+# converges quite well, even if the fluid linear solver is not converging.
 # This is the main "trick" needed to make scaling of SUPG/LSIC parameters
 # for mass conservation tractable in 3D problems.  
 fluidLinearSolver = PETScKrylovSolver("gmres","jacobi")
