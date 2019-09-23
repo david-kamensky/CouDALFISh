@@ -10,6 +10,8 @@ demo, using the command ``tar cvzf leaflet-geometries.tgz``.
 
 Some notes:
 
+- Numbers are all in the centimeter--gram--second (CGS) system.
+
 - Systolic pressure is applied impulsively to quiescent initial conditions,
   which is why the first time step takes many iterations to converge.
 
@@ -97,6 +99,9 @@ parser.add_argument('--outSkip',dest='outSkip',default=10,
                     help="Time steps between writing visualization files.")
 parser.add_argument('--Nsteps',dest='Nsteps',default=10000,
                     help="Total number of time steps.")
+parser.add_argument('--outputFileName',dest='outputFileName',
+                    default="flow-rate",
+                    help="File to write flow rate data to.")
 
 args = parser.parse_args()
 resolution = int(args.resolution)
@@ -112,6 +117,7 @@ outSkip = int(args.outSkip)
 Nsteps = int(args.Nsteps)
 stabEps = Constant(float(args.stabEps))
 blockItTol = float(args.blockItTol)
+outputFileName = str(args.outputFileName)
 
 ####### IGA foreground mesh and function space setup #######
 
@@ -191,9 +197,9 @@ vq = TestFunction(V_f)
 # Define traction boundary condition at inflow:
 xSpatial = SpatialCoordinate(mesh)
 PRESSURE = Expression("((t<0.1)? 2e4 : -1e5)",t=0.0,degree=1)
-inflowTraction = as_vector((0.0,0.0,PRESSURE))\
-                 *conditional(lt(xSpatial[2],BOTTOM+0.1),
-                              1.0,Constant(0.0))
+inflowChar = conditional(lt(xSpatial[2],BOTTOM+1e-3),1.0,Constant(0.0))
+inflowTraction = as_vector((0.0,0.0,PRESSURE))*inflowChar
+
 quadDeg = 2
 dx = dx(metadata={"quadrature_degree":quadDeg})
 ds = ds(metadata={"quadrature_degree":quadDeg})
@@ -219,6 +225,9 @@ bcs_f = [DirichletBC(V_f.sub(0), Constant(d*(0.0,)),
                      (lambda x, on_boundary :
                       on_boundary and
                       math.sqrt(x[0]*x[0]+x[1]*x[1])>0.98*CYLINDER_RAD)),]
+
+# Form to evaluate net inflow:
+netInflow = -inflowChar*dot(u,n)*ds
 
 # Set up shell structure problem using ShNAPr:
 y_hom = Function(spline.V)
@@ -315,8 +324,8 @@ for timeStep in range(0,Nsteps):
             d0File << d0
             d1File << d1
             d2File << d2
-            # (Note that the components of spline.F are rational, and cannot be
-            # directly outputted to ParaView files.)
+            # (Note that the components of spline.F are rational,
+            # and cannot be directly outputted to ParaView files.)
             spline.cpFuncs[0].rename("F0","F0")
             spline.cpFuncs[1].rename("F1","F1")
             spline.cpFuncs[2].rename("F2","F2")
@@ -335,3 +344,13 @@ for timeStep in range(0,Nsteps):
 
     # Compute the time step for the coupled problem:
     fsiProblem.takeStep()
+
+    # Write flow rate to a file
+    flowRate = assemble(netInflow)
+    if(mpirank==0):
+        mode = "a"
+        if(timeStep==0):
+            mode = "w"
+        outFile = open(outputFileName,mode)
+        outFile.write(str(t)+" "+str(flowRate)+"\n")
+        outFile.close()
