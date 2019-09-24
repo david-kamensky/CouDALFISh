@@ -404,6 +404,18 @@ class CouDALFISh:
             relNorm_f = Fnorm_f/Fnorm_f0
             if(Fnorm_sh0 < 0.0 and Fnorm_sh > DOLFIN_EPS):
                 Fnorm_sh0 = Fnorm_sh
+                
+            # This condition is to catch cases where there is an
+            # impulsive change in time-dependent data, which leads to
+            # a sudden increase in the shell residual from the first to
+            # second iteration, such that convergence relative to the
+            # initial shell residual will lead to extreme over-solving.
+            if(Fnorm_sh > Fnorm_sh0 and blockIt > 0):
+                if(mpirank==0):
+                    print("  ........... "
+                          +"*** NOTE: Shell convergence criterion reset ***")
+                Fnorm_sh0 = Fnorm_sh
+                
             if(Fnorm_sh0 > 0.0):
                 relNorm_sh = Fnorm_sh/Fnorm_sh0
             else:
