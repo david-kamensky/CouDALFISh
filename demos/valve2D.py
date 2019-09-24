@@ -328,19 +328,14 @@ for timeStep in range(0,N_steps):
         # the spline parametric space is modified for multi-patch splines.
         xi_tip = array([1.0-DOLFIN_EPS,0.5])
 
-        # Note that time t is at midpoint of the current step:
         tipDisp = y_hom(xi_tip)
-        tipDisp_old = y_old_hom(xi_tip)
-        tipDisp_alpha = x_alpha(tipDisp,tipDisp_old)
-        tipDisp_x = tipDisp_alpha[0]
-        tipDisp_y = tipDisp_alpha[1]
-        
         mode = "a"
         if(timeStep==0):
             mode = "w"
         outFile = open(outputFileName,mode)
-        outFile.write(str(t.t)+" "+str(tipDisp_x)+" "
-                      +str(tipDisp_y)+"\n")
+        # Note that time t is at midpoint of the current step:
+        outFile.write(str(t.t+0.5*float(Dt))+" "+str(tipDisp[0])+" "
+                      +str(tipDisp[1])+"\n")
         outFile.close()
 
     # Advance time:
