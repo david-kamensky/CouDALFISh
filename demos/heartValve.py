@@ -198,6 +198,11 @@ vq = TestFunction(V_f)
 xSpatial = SpatialCoordinate(mesh)
 PRESSURE = Expression("((t<0.1)? 2e4 : -1e5)",t=0.0,degree=1)
 inflowChar = conditional(lt(xSpatial[2],BOTTOM+1e-3),1.0,Constant(0.0))
+# It's actually prefereable here to use a characteristic function instead
+# of marking the inflow facets, because the "zero traction" BC at the outflow
+# still requires stabilization terms.  As such, we can kill two birds with
+# on stone by defining a spatially-varying traction like this and applying
+# it on the full boundary with VarMINT's stable Neumann BC formulation.
 inflowTraction = as_vector((0.0,0.0,PRESSURE))*inflowChar
 
 quadDeg = 2
