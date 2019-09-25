@@ -257,8 +257,9 @@ class CouDALFISh:
                                                self.lam[node], n[node,:], w)
                 for j in range(0,d):
                     rhsPointSourceData[j] += [(Point(nodex[node]),-dF[j]),]
+                    # Factor of 0.5 for midpoint rule:
                     lhsPointSourceData[j] += [(Point(nodex[node]),
-                                               self.penalty*w),]
+                                               0.5*self.penalty*w),]
 
         # Apply scalar point sources to sub-spaces corresponding to different
         # displacement components globally (but only rank 0's lists are
@@ -295,7 +296,9 @@ class CouDALFISh:
             for direction in range(0,d):
                 index = nodeToDof(node,direction)
                 bv.setValue(index,dF[direction],addv=ADD_MODE)
-                lmVec.setValue(index,self.penalty*w,addv=ADD_MODE)
+                # Factor of 1/Dt for tangent of displacement problem:
+                lmVec.setValue(index,self.penalty/float(self.Dt)*w,
+                               addv=ADD_MODE)
         Am.setDiagonal(lmVec,addv=ADD_MODE)
         
     def updateMultipliers(self, u_sh, u_f, n):
@@ -440,12 +443,12 @@ class CouDALFISh:
                     print("ERROR: Block iteration diverged.")
                 exit()
 
-        # Update Lagrange multiplier
-        #
-        # Maybe update nodeydot and nShell to the latest structure
-        # solution, although, if the iteration is really converged, it
-        # shouldn't make any difference.
-        #
+        # Update Lagrange multiplier using most recent structure solution.
+        ydotFunc = Function(self.spline_sh.V)
+        ydotFunc.assign(self.ydot_alpha_hom)
+        nodeydot = self.contactContext_sh.evalFunction(ydotFunc)
+        self.updateNodalNormals()
+        noden = self.contactContext_sh.evalFunction(self.n_nodal_sh)
         self.updateMultipliers(nodeydot, nodeu, noden)
 
         # Move to the next time step.
