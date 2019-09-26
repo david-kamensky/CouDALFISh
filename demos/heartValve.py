@@ -43,12 +43,18 @@ Some notes:
 - Higher-than-default resolutions may also require higher-than-default 
   values for the maximum number of Krylov iterations for the fluid solver,
   which can be set via the command line argument ``--maxKSPIt=<integer>``.  
+
+- Writing ParaView files while running is handy for one-shot runs, although 
+  it doesn't play nicely with restarting, so, for larger/longer runs, 
+  it is better to turn this off with the option ``--noViz`` and load and 
+  visualize each set of restart files in a separate postprocessing step.
 """
 
 from CouDALFISh import *
 from tIGAr.BSplines import *
 from VarMINT import *
 from ShNAPr.SVK import *
+from os import path
 
 # Check whether the user downloaded and extracted the data files to the
 # working directory; assume that if one is present all are, since including
@@ -79,11 +85,11 @@ parser.add_argument('--maxKSPIt',dest='maxKSPIt',default=300,
                     help="Maximum number of fluid Krylov iterations.")
 parser.add_argument('--fluidKSPrtol',dest='fluidKSPrtol',default=1e-2,
                     help="Relative tolerance for fluid Krylov solver.")
-parser.add_argument('--DAL_penalty',dest='DAL_penalty',default=1e2,
+parser.add_argument('--DAL_penalty',dest='DAL_penalty',default=5e2,
                     help="Value of penalty for DAL method.")
 parser.add_argument('--DAL_r',dest='DAL_r',default=1e-5,
                     help="Value of regularization parameter for DAL method.")
-parser.add_argument('--blockItTol',dest='blockItTol',default=1e-2,
+parser.add_argument('--blockItTol',dest='blockItTol',default=1e-4,
                     help="Relative tolerance for block iteration.")
 parser.add_argument('--stabEps',dest='stabEps',default=1e-3,
                     help="Scaling of SUPG constant near immersed shell.")
@@ -102,6 +108,11 @@ parser.add_argument('--Nsteps',dest='Nsteps',default=10000,
 parser.add_argument('--outputFileName',dest='outputFileName',
                     default="flow-rate",
                     help="File to write flow rate data to.")
+parser.add_argument('--restartPath',dest='restartPath',
+                    default="restarts",
+                    help="Name of directory to write restart files to.")
+parser.add_argument('--noViz',dest='noViz',action='store_true',
+                    help='Do not write ParaView files.')
 
 args = parser.parse_args()
 resolution = int(args.resolution)
@@ -118,6 +129,11 @@ Nsteps = int(args.Nsteps)
 stabEps = Constant(float(args.stabEps))
 blockItTol = float(args.blockItTol)
 outputFileName = str(args.outputFileName)
+restartPath = str(args.restartPath)
+viz = (not bool(args.noViz))
+
+# Check if restarting:
+restarting = path.exists("step.dat")
 
 ####### IGA foreground mesh and function space setup #######
 
@@ -172,7 +188,19 @@ for i in range(0,3):
     sinusCenter = Point(sinusCenterRad*math.cos(sinusTheta),
                         sinusCenterRad*math.sin(sinusTheta),sinusZ)
     tube += Sphere(sinusCenter,sinusRad)
-mesh = generate_mesh(tube,resolution)
+
+# Must not re-generate mesh when restarting, because CGAL is not
+# deterministic. 
+if(restarting):
+    mesh = Mesh()
+    f = HDF5File(worldcomm,"mesh.h5","r")
+    f.read(mesh,"/mesh",True)
+    f.close()
+else:
+    mesh = generate_mesh(tube,resolution)
+    f = HDF5File(worldcomm,"mesh.h5","w")
+    f.write(mesh,"/mesh")
+    f.close()
 
 # Print mesh statistics:
 Nel_f = mesh.num_entities_global(mesh.topology().dim())
@@ -306,9 +334,21 @@ if(mpirank==0):
 uFile = File("results/u.pvd")
 pFile = File("results/p.pvd")
 
+# Initial conditions:
+if(restarting):
+    stepFile = open("step.dat","r")
+    fs = stepFile.read()
+    stepFile.close()
+    tokens = fs.split()
+    startStep = int(tokens[0])
+    t = float(tokens[1])
+    fsiProblem.readRestarts(restartPath,startStep)
+else:
+    startStep = 0
+    t = 0.0
+
 # Time stepping loop:
-t = 0.0
-for timeStep in range(0,Nsteps):
+for timeStep in range(startStep,Nsteps):
     
     t += float(Dt)
     PRESSURE.t = t-0.5*float(Dt) # (for midpoint rule)
@@ -317,11 +357,18 @@ for timeStep in range(0,Nsteps):
         print("------- Time step "+str(timeStep+1)
               +" , t = "+str(t)+" -------")
 
-    # Output fields needed for visualization.
+    # Output fields needed for restarting and visualization.
     if(timeStep % outSkip == 0):
 
-        # Structure:
+        # Restart data:
+        fsiProblem.writeRestarts(restartPath,timeStep)
         if(mpirank==0):
+            stepFile = open("step.dat","w")
+            stepFile.write(str(timeStep)+" "+str(t-float(Dt)))
+            stepFile.close()
+        
+        # Structure:
+        if(mpirank==0 and viz):
             (d0,d1,d2) = y_hom.split()
             d0.rename("d0","d0")
             d1.rename("d1","d1")

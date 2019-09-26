@@ -12,7 +12,7 @@ on the dynamic augmented Lagrangian (DAL) method.
 from ShNAPr.kinematics import *
 from ShNAPr.contact import *
 from mpi4py import MPI as pyMPI
-from numpy import zeros
+from numpy import zeros, save, load
 
 # This module assumes 3D problems:
 d = 3
@@ -328,12 +328,62 @@ class CouDALFISh:
         multiPointSources = PointSource(self.Vscalar_f,pointSourceData)
         multiPointSources.apply(self.cutFunc.vector())
 
+    # These are mainly for internal use, because the file names must match
+    # when reading and writing.
+    def fluidRestartName(self,restartPath,i):
+        return restartPath+"/restart_f."+str(i)+".h5"
+    def shellRestartName(self,restartPath,i):
+        return restartPath+"/restart_sh."+str(i)+".h5"
+    def lamRestartName(self,restartPath,i):
+        return restartPath+"/restart_lam."+str(i)+".npy"
+
+    def writeRestarts(self,restartPath,i):
+        """
+        Write out all data needed to restart the computation from step ``i``, 
+        where ``restartPath`` is the path to a directory containing restart
+        files for all time steps.  This should be called before
+        ``self.takeStep()`` within a typical time stepping loop.
+        """
+        # Only the master task writes shell restarts.
+        if(mpirank==0):
+            f = HDF5File(selfcomm,self.shellRestartName(restartPath,i),"w")
+            f.write(self.y_old_hom,"/y_old_hom")
+            f.write(self.ydot_old_hom,"/ydot_old_hom")
+            f.close()
+            f = open(self.lamRestartName(restartPath,i),"wb")
+            save(f,self.lam,allow_pickle=False)
+            f.close()
+        f = HDF5File(worldcomm,self.fluidRestartName(restartPath,i),"w")
+        f.write(self.up_old,"/up_old")
+        f.close()
+        
+    def readRestarts(self,restartPath,i):
+        """
+        Read in data needed to restart the computation from step ``i``, 
+        where ``restartPath`` is the path to a directory containing restart
+        files for all time steps.  This should be called prior to the 
+        beginning of the time stepping loop, with ``i`` equal to the index
+        of the first time step to be executed.
+        """
+        # Each task reads a copy of the shell state on its self communicator.
+        f = HDF5File(selfcomm,self.shellRestartName(restartPath,i),"r")
+        f.read(self.y_old_hom,"/y_old_hom")
+        f.read(self.ydot_old_hom,"/ydot_old_hom")
+        f.close()
+        f = open(self.lamRestartName(restartPath,i),"rb")
+        self.lam = load(f)
+        f.close()
+        f = HDF5File(worldcomm,self.fluidRestartName(restartPath,i),"r")
+        f.read(self.up_old,"/up_old")        
+        f.close()
+        
     def takeStep(self):
         """
         Advance the ``CouDALFISh`` by one time step.
         """
-        # Same-velocity structure predictor, for consistency w/ fluid:
+        # Same-velocity predictor:
         self.y_hom.assign(self.y_old_hom + self.Dt*self.ydot_old_hom)
+        self.up.assign(self.up_old)
 
         # Explicit-in-geometry:
         yFunc = Function(self.spline_sh.V)
