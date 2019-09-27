@@ -26,18 +26,6 @@ will ultimately limit convergence, but discretization error is overwhelmingly
 due to poor approximately of discontinuous pressure and velocity gradients
 in the fluid subproblem, and we are not exploring convergence rigorously here,
 using Sobolev norms, so it is good enough for the present purposes.)  
-
-Notes:
-
-- The impulsively-started velocity BC, in conjunction with midpoint time
-  integration, leads to a flickering mode in the fluid subproblem's
-  pressure field.  This can be reduced by smoothing the activation of the
-  velocity BC over more time steps, ``--N_reg``, at the cost of deviating
-  further from the original benchmark (unless ``--N_steps_over_Nel`` is also
-  increased, thus increasing cost).  However, the flickering pressure does 
-  not appear to affect the convergence of the quantity of interest in this 
-  example, namely the structure displacement field.  Therefore we have chosen
-  not to address it with the default settings.
 """
 
 # For FSI, fluids, and shells:
@@ -99,6 +87,8 @@ parser.add_argument('--N_reg',dest='N_reg',default=2,
                     help="No. of time steps to spread BC activation over.")
 parser.add_argument('--N_steps_over_Nel',dest='N_steps_over_Nel',default=32,
                     help="No. of time steps per vertical-direction element.")
+parser.add_argument('--rho_infty',dest='rho_infty',default=0.0,
+                    help="Spectral radius of time integrator at Dt=infty.")
 parser.add_argument('--outputFileName',dest='outputFileName',
                     default="tip-displacement",
                     help="File to write tip displacement data to.")
@@ -115,6 +105,7 @@ OUTPUT_SKIP = int(args.OUTPUT_SKIP)
 blockItTol = float(args.blockItTol)
 N_reg = int(args.N_reg)
 N_steps_over_Nel = int(args.N_steps_over_Nel)
+rho_infty = Constant(float(args.rho_infty))
 outputFileName = str(args.outputFileName)
 
 # Fixed parameters of the benchmark problem:
@@ -183,10 +174,7 @@ GEO_EPS = 1e8*DOLFIN_EPS
 mesh = BoxMesh(Point(-GEO_EPS,-GEO_EPS,-GEO_EPS),
                Point(L+GEO_EPS,H+GEO_EPS,D+GEO_EPS),
                Nel_f_horiz,Nel_f_vert,1)
-VE = VectorElement("Lagrange",mesh.ufl_cell(),1)
-QE = FiniteElement("Lagrange",mesh.ufl_cell(),1)
-VQE = MixedElement([VE,QE])
-V_f = FunctionSpace(mesh,VQE)
+V_f = equalOrderSpace(mesh)
 Vscalar = FunctionSpace(mesh,"Lagrange",1)
 x_f = SpatialCoordinate(mesh)
 
@@ -209,8 +197,12 @@ v_BC = conditional(gt(t,T_reg),v_BCf(t),t*v_BCf(T_reg)/T_reg)
 # Shell structure subproblem, using ShNAPr:
 y_hom = Function(spline.V)
 y_old_hom = Function(spline.V)
-y_alpha_hom = x_alpha(y_hom,y_old_hom)
 ydot_old_hom = Function(spline.V)
+yddot_old_hom = Function(spline.V)
+timeInt_sh = GeneralizedAlphaIntegrator(rho_infty,Dt,y_hom,
+                                        (y_old_hom,ydot_old_hom,yddot_old_hom),
+                                        useFirstOrderAlphaM=True)
+y_alpha_hom = timeInt_sh.x_alpha()
 z_hom = TestFunction(spline.V)
 z = spline.rationalize(z_hom)
 
@@ -218,22 +210,28 @@ X = spline.F
 x = X + spline.rationalize(y_alpha_hom)
 Wint = surfaceEnergyDensitySVK(spline,X,x,E,nu,h_th)*spline.dx
 
-yddot = spline.rationalize(xddot_alpha(y_hom,y_old_hom,ydot_old_hom,Dt))
+yddot = spline.rationalize(timeInt_sh.xddot_alpha())
 res_sh = inner(rho0*h_th*yddot,z)*spline.dx \
-         + dx_dx_alpha*derivative(Wint,y_hom,z_hom)
+         + (1.0/timeInt_sh.ALPHA_F)*derivative(Wint,y_hom,z_hom)
 
 # Fluid subproblem, using VarMINT:
 up = Function(V_f)
 up_old = Function(V_f)
+updot_old = Function(V_f)
+timeInt_f = GeneralizedAlphaIntegrator(rho_infty,Dt,up,(up_old,updot_old))
 vq = TestFunction(V_f)
+
+def uPart(up):
+    return as_vector([up[0],up[1],up[2]])
 
 dx = dx(metadata={"quadrature_degree":femQuadDeg})
 ds = ds(metadata={"quadrature_degree":femQuadDeg})
-u,p = split(up)
-u_old,_ = split(up_old)
 v,q = split(vq)
-u_alpha = x_alpha(u,u_old)
-u_t_alpha = xdot_alpha(u,u_old,Dt)
+up_alpha = timeInt_f.x_alpha()
+updot_alpha = timeInt_f.xdot_alpha()
+u_alpha = uPart(up_alpha)
+p = up[3]
+u_t_alpha = uPart(updot_alpha)
 cutFunc = Function(Vscalar)
 res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,
                          u_t=u_t_alpha,Dt=Dt,dx=dx,
@@ -254,9 +252,9 @@ bcs_f = [DirichletBC(V_f.sub(0).sub(d-1),Constant(0.0),
                      "x[2]<0.0 || x[2]>"+str(D)),]
 
 # Coupling with CouDALFISh:
-fsiProblem = CouDALFISh(mesh,res_f,up,up_old,
-                        spline,res_sh,y_hom,y_old_hom,ydot_old_hom,
-                        Dt,penalty,
+fsiProblem = CouDALFISh(mesh,res_f,timeInt_f,
+                        spline,res_sh,timeInt_sh,
+                        penalty,
                         bcs_f=bcs_f,
                         blockItTol=blockItTol,cutFunc=cutFunc,
                         r=0.0)
@@ -282,7 +280,7 @@ uFile = File("results/u.pvd")
 pFile = File("results/p.pvd")
 
 # Time stepping loop:
-t.t = 0.5*float(Dt)
+t.t = float(timeInt_f.ALPHA_F)*float(Dt)
 for timeStep in range(0,N_steps):
     
     if(mpirank==0):
@@ -333,8 +331,9 @@ for timeStep in range(0,N_steps):
         if(timeStep==0):
             mode = "w"
         outFile = open(outputFileName,mode)
-        # Note that time t is at midpoint of the current step:
-        outFile.write(str(t.t+0.5*float(Dt))+" "+str(tipDisp[0])+" "
+        # Note that time t is at the alpha level of the current step:
+        outFile.write(str(t.t+(1.0-float(timeInt_sh.ALPHA_F))*float(Dt))
+                      +" "+str(tipDisp[0])+" "
                       +str(tipDisp[1])+"\n")
         outFile.close()
 

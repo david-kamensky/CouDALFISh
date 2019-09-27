@@ -89,7 +89,7 @@ parser.add_argument('--DAL_penalty',dest='DAL_penalty',default=5e2,
                     help="Value of penalty for DAL method.")
 parser.add_argument('--DAL_r',dest='DAL_r',default=1e-5,
                     help="Value of regularization parameter for DAL method.")
-parser.add_argument('--blockItTol',dest='blockItTol',default=1e-4,
+parser.add_argument('--blockItTol',dest='blockItTol',default=1e-2,
                     help="Relative tolerance for block iteration.")
 parser.add_argument('--stabEps',dest='stabEps',default=1e-3,
                     help="Scaling of SUPG constant near immersed shell.")
@@ -101,6 +101,8 @@ parser.add_argument('--R_self',dest='R_self',default=0.045,
                     help="Range of ignored self-contact in reference config.")
 parser.add_argument('--Dt',dest='Dt',default=0.5e-4,
                     help="Time step.")
+parser.add_argument('--rho_infty',dest='rho_infty',default=0.0,
+                    help="Spectral radius of time integrator at Dt=infty.")
 parser.add_argument('--outSkip',dest='outSkip',default=10,
                     help="Time steps between writing visualization files.")
 parser.add_argument('--Nsteps',dest='Nsteps',default=10000,
@@ -124,6 +126,7 @@ r_max = float(args.r_max)
 k_contact = float(args.k_contact)
 R_self = float(args.R_self)
 Dt = Constant(float(args.Dt))
+rho_infty = Constant(float(args.rho_infty))
 outSkip = int(args.outSkip)
 Nsteps = int(args.Nsteps)
 stabEps = Constant(float(args.stabEps))
@@ -134,6 +137,16 @@ viz = (not bool(args.noViz))
 
 # Check if restarting:
 restarting = path.exists("step.dat")
+if(restarting):
+    stepFile = open("step.dat","r")
+    fs = stepFile.read()
+    stepFile.close()
+    tokens = fs.split()
+    startStep = int(tokens[0])
+    t = float(tokens[1])
+else:
+    startStep = 0
+    t = 0.0
 
 ####### IGA foreground mesh and function space setup #######
 
@@ -216,11 +229,13 @@ if(mpirank==0):
 VE = VectorElement("Lagrange",mesh.ufl_cell(),1)
 QE = FiniteElement("Lagrange",mesh.ufl_cell(),1)
 VQE = MixedElement([VE,QE])
-V_f = FunctionSpace(mesh,VQE)
+V_f = equalOrderSpace(mesh)
 Vscalar = FunctionSpace(mesh,"Lagrange",1)
 up = Function(V_f)
 up_old = Function(V_f)
+updot_old = Function(V_f)
 vq = TestFunction(V_f)
+timeInt_f = GeneralizedAlphaIntegrator(rho_infty,Dt,up,(up_old,updot_old),t)
 
 # Define traction boundary condition at inflow:
 xSpatial = SpatialCoordinate(mesh)
@@ -233,16 +248,20 @@ inflowChar = conditional(lt(xSpatial[2],BOTTOM+1e-3),1.0,Constant(0.0))
 # it on the full boundary with VarMINT's stable Neumann BC formulation.
 inflowTraction = as_vector((0.0,0.0,PRESSURE))*inflowChar
 
+def uPart(up):
+    return as_vector([up[0],up[1],up[2]])
+
 quadDeg = 2
 dx = dx(metadata={"quadrature_degree":quadDeg})
 ds = ds(metadata={"quadrature_degree":quadDeg})
 rho = Constant(1.0)
 mu = Constant(3e-2)
-u,p = split(up)
-u_old,_ = split(up_old)
-u_alpha = x_alpha(u,u_old)
+up_alpha = timeInt_f.x_alpha()
+u_alpha = uPart(up_alpha)
+p = timeInt_f.x[3]
 v,q = split(vq)
-u_t = xdot_alpha(u,u_old,Dt)
+up_t = timeInt_f.xdot_alpha()
+u_t = uPart(up_t)
 cutFunc = Function(Vscalar)
 res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,u_t=u_t,Dt=Dt,dx=dx,
                          stabScale=stabScale(cutFunc,stabEps))
@@ -260,14 +279,18 @@ bcs_f = [DirichletBC(V_f.sub(0), Constant(d*(0.0,)),
                       math.sqrt(x[0]*x[0]+x[1]*x[1])>0.98*CYLINDER_RAD)),]
 
 # Form to evaluate net inflow:
+u = uPart(up)
 netInflow = -inflowChar*dot(u,n)*ds
 
 # Set up shell structure problem using ShNAPr:
 y_hom = Function(spline.V)
 y_old_hom = Function(spline.V)
-y_alpha_hom = x_alpha(y_hom,y_old_hom)
 ydot_old_hom = Function(spline.V)
-ydot_hom = xdot_alpha(y_hom,y_old_hom,Dt)
+yddot_old_hom = Function(spline.V)
+timeInt_sh = GeneralizedAlphaIntegrator(rho_infty,Dt,y_hom,
+                                        (y_old_hom,ydot_old_hom,yddot_old_hom),
+                                        t=t,useFirstOrderAlphaM=True)
+y_alpha_hom = timeInt_sh.x_alpha()
 z_hom = TestFunction(spline.V)
 z = spline.rationalize(z_hom)
 
@@ -278,9 +301,9 @@ rho0 = Constant(1.0)
 X = spline.F
 x = X + spline.rationalize(y_alpha_hom)
 Wint = surfaceEnergyDensitySVK(spline,X,x,E,nu,h_th)*spline.dx
-yddot = spline.rationalize(xddot_alpha(y_hom,y_old_hom,ydot_old_hom,Dt))
+yddot = spline.rationalize(timeInt_sh.xddot_alpha())
 res_sh = rho0*h_th*inner(yddot,z)*spline.dx \
-         + dx_dx_alpha*derivative(Wint,y_hom,z_hom)
+         + (1.0/timeInt_sh.ALPHA_F)*derivative(Wint,y_hom,z_hom)
 
 # Define contact context:
 def phiPrime(r):
@@ -305,9 +328,9 @@ fluidLinearSolver.ksp().setTolerances(rtol=fluidKSPrtol,max_it=maxKSPIt)
 fluidLinearSolver.ksp().setGMRESRestart(maxKSPIt)
 
 # Couple with CouDALFISh:
-fsiProblem = CouDALFISh(mesh,res_f,up,up_old,
-                        spline,res_sh,y_hom,y_old_hom,ydot_old_hom,
-                        Dt,DAL_penalty,r=DAL_r,
+fsiProblem = CouDALFISh(mesh,res_f,timeInt_f,
+                        spline,res_sh,timeInt_sh,
+                        DAL_penalty,r=DAL_r,
                         bcs_f=bcs_f,
                         blockItTol=blockItTol,
                         contactContext_sh=contactContext_sh,
@@ -336,26 +359,16 @@ pFile = File("results/p.pvd")
 
 # Initial conditions:
 if(restarting):
-    stepFile = open("step.dat","r")
-    fs = stepFile.read()
-    stepFile.close()
-    tokens = fs.split()
-    startStep = int(tokens[0])
-    t = float(tokens[1])
     fsiProblem.readRestarts(restartPath,startStep)
-else:
-    startStep = 0
-    t = 0.0
 
 # Time stepping loop:
 for timeStep in range(startStep,Nsteps):
     
-    t += float(Dt)
-    PRESSURE.t = t-0.5*float(Dt) # (for midpoint rule)
+    PRESSURE.t = timeInt_f.t-(1.0-float(timeInt_f.ALPHA_M))*float(Dt)
 
     if(mpirank==0):
         print("------- Time step "+str(timeStep+1)
-              +" , t = "+str(t)+" -------")
+              +" , t = "+str(timeInt_f.t)+" -------")
 
     # Output fields needed for restarting and visualization.
     if(timeStep % outSkip == 0):
@@ -364,35 +377,36 @@ for timeStep in range(startStep,Nsteps):
         fsiProblem.writeRestarts(restartPath,timeStep)
         if(mpirank==0):
             stepFile = open("step.dat","w")
-            stepFile.write(str(timeStep)+" "+str(t-float(Dt)))
+            stepFile.write(str(timeStep)+" "+str(timeInt_f.t-float(Dt)))
             stepFile.close()
-        
-        # Structure:
-        if(mpirank==0 and viz):
-            (d0,d1,d2) = y_hom.split()
-            d0.rename("d0","d0")
-            d1.rename("d1","d1")
-            d2.rename("d2","d2")
-            d0File << d0
-            d1File << d1
-            d2File << d2
-            # (Note that the components of spline.F are rational,
-            # and cannot be directly outputted to ParaView files.)
-            spline.cpFuncs[0].rename("F0","F0")
-            spline.cpFuncs[1].rename("F1","F1")
-            spline.cpFuncs[2].rename("F2","F2")
-            spline.cpFuncs[3].rename("F3","F3")
-            F0File << spline.cpFuncs[0]
-            F1File << spline.cpFuncs[1]
-            F2File << spline.cpFuncs[2]
-            F3File << spline.cpFuncs[3]
 
-        # Fluid:
-        (uout,pout) = up.split()
-        uout.rename("u","u")
-        pout.rename("p","p")
-        uFile << uout
-        pFile << pout
+        if(viz):
+            # Structure:
+            if(mpirank==0):
+                (d0,d1,d2) = y_hom.split()
+                d0.rename("d0","d0")
+                d1.rename("d1","d1")
+                d2.rename("d2","d2")
+                d0File << d0
+                d1File << d1
+                d2File << d2
+                # (Note that the components of spline.F are rational,
+                # and cannot be directly outputted to ParaView files.)
+                spline.cpFuncs[0].rename("F0","F0")
+                spline.cpFuncs[1].rename("F1","F1")
+                spline.cpFuncs[2].rename("F2","F2")
+                spline.cpFuncs[3].rename("F3","F3")
+                F0File << spline.cpFuncs[0]
+                F1File << spline.cpFuncs[1]
+                F2File << spline.cpFuncs[2]
+                F3File << spline.cpFuncs[3]
+
+            # Fluid:
+            (uout,pout) = up.split()
+            uout.rename("u","u")
+            pout.rename("p","p")
+            uFile << uout
+            pFile << pout
 
     # Compute the time step for the coupled problem:
     fsiProblem.takeStep()
@@ -404,5 +418,5 @@ for timeStep in range(startStep,Nsteps):
         if(timeStep==0):
             mode = "w"
         outFile = open(outputFileName,mode)
-        outFile.write(str(t)+" "+str(flowRate)+"\n")
+        outFile.write(str(timeInt_f.t)+" "+str(flowRate)+"\n")
         outFile.close()

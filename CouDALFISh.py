@@ -13,6 +13,7 @@ from ShNAPr.kinematics import *
 from ShNAPr.contact import *
 from mpi4py import MPI as pyMPI
 from numpy import zeros, save, load
+from tIGAr.timeIntegration import *
 
 # This module assumes 3D problems:
 d = 3
@@ -27,48 +28,14 @@ def stabScale(cutFunc,eps):
     """
     return conditional(gt(abs(cutFunc),0.0),eps,1.0)
 
-# Use these as free functions when defining the residual for a CouDALFISh,
-# to ensure consistency of time integration method.
-dx_dx_alpha = 2.0
-def x_alpha(x,x_old):
-    """
-    The alpha-level state, as a function of ``x`` and ``x_old``.
-    """
-    return 0.5*(x + x_old)
-def xdot_alpha(x,x_old,Dt):
-    """
-    The alpha-level velocity, as a function of the current and previous
-    states ``x`` and ``x_old``, and the time step ``Dt``.
-    """
-    iDt = Constant(1.0/Dt)
-    return iDt*x - iDt*x_old
-def xdot(x,x_old,xdot_old,Dt):
-    """
-    The (n+1)-level velocity, as a function of the (n+1)-level ``x``, 
-    the previous time step's state, ``x_old``, the previous time step's
-    velocity ``xdot_old``, and the time step ``Dt``.
-    """
-    # This must be recognizable to UFL as a "linear combination of Functions"
-    # for the purpose of updating old values stored as Functions.
-    a = Constant(2.0/Dt)
-    return a*x - a*x_old - xdot_old
-def xddot_alpha(x,x_old,xdot_old,Dt):
-    """
-    The alpha-level acceleration, as a function of the (n+1)-level ``x``,
-    the n-level ``x_old``, the n-level velocity, ``xdot_old``, and the
-    time step ``Dt``.
-    """
-    iDt = Constant(1.0/Dt)
-    return 2.0*iDt*iDt*(x-x_old) - 2.0*iDt*xdot_old
-
 class CouDALFISh:
     """
     This class keeps track of data used for coupling a fluid and shell
     structure.
     """
-    def __init__(self,mesh_f, res_f, up, up_old,
-                 spline_sh, res_sh, y_hom, y_old_hom, ydot_old_hom,
-                 Dt, penalty, r=0.0,
+    def __init__(self,mesh_f, res_f, timeInt_f,
+                 spline_sh, res_sh, timeInt_sh,
+                 penalty, r=0.0,
                  blockItTol=1e-3, blockIts=100,
                  bcs_f=[],
                  Dres_f=None, Dres_sh=None,
@@ -78,14 +45,11 @@ class CouDALFISh:
         """
         ``mesh_f`` is the fluid finite element mesh.  ``res_f`` is the 
         residual of the fluid subproblem formulation, without including
-        coupling terms.  ``up`` is a ``Function`` that is used in ``res_f``
-        as the unknown solution.  ``up_old`` is the previous time step's 
-        solution.  ``spline_sh`` and ``res_sh`` are the shell structure's
-        ``ExtractedSpline`` and residual (again without coupling terms), and
-        ``y_hom``, ``y_old_hom``, and ``ydot_old_hom`` are the unknown
-        displacement, previous time step's displacement, and previous
-        time step's velocity, all in homogeneous representation.  ``Dt`` is 
-        the time step, and ``penalty`` is the implicit velocity penalty.  
+        coupling terms.  ``spline_sh`` and ``res_sh`` are the shell structure's
+        ``ExtractedSpline`` and residual (again without coupling terms). The
+        arguments ``timeInt_sh`` and ``timeInt_f`` are ``tIGAr`` 
+        generalized-alpha integrators for the shell and fluid.  
+        ``penalty`` is the implicit velocity penalty.  
 
         The optional parameter ``r`` is the stabilization parameter denoted
         by the same character in this paper:
@@ -112,13 +76,24 @@ class CouDALFISh:
         stabilization parameters.
         """
         self.mesh_f = mesh_f
-        self.up = up
-        self.up_old = up_old
-        self.up_alpha = x_alpha(up,up_old)
+        self.timeInt_f = timeInt_f
+        self.fluidFac = float(self.timeInt_f.ALPHA_F)
+        self.up = self.timeInt_f.x
+        self.up_old = self.timeInt_f.x_old
+        self.updot_old = self.timeInt_f.xdot_old
+        self.up_alpha = self.timeInt_f.x_alpha()
         self.V_f = self.up.function_space()
         self.spline_sh = spline_sh
         self.penalty = penalty
-        self.Dt = Dt
+        self.Dt = self.timeInt_f.DELTA_T
+        self.timeInt_sh = timeInt_sh
+        if(self.timeInt_sh.systemOrder == 2):
+            fac = float(self.timeInt_sh.ALPHA_F)*float(self.timeInt_sh.GAMMA)\
+                  /(float(self.timeInt_sh.BETA)*float(self.Dt))
+        else:
+            fac = float(self.timeInt_sh.ALPHA_F)\
+                  /(float(self.timeInt_sh.GAMMA)*float(self.Dt))
+        self.shellFac = fac
         self.blockIts = blockIts
         self.blockItTol = blockItTol
         self.bcs_f = bcs_f
@@ -140,19 +115,19 @@ class CouDALFISh:
         self.lam = zeros(self.nNodes_sh)
         self.res_f = res_f
         self.res_sh = res_sh
-        self.y_hom = y_hom
-        self.y_old_hom = y_old_hom
-        self.y_alpha_hom = x_alpha(y_hom,y_old_hom)
-        self.ydot_old_hom = ydot_old_hom
-        self.ydot_hom = xdot(self.y_hom,self.y_old_hom,
-                             self.ydot_old_hom,self.Dt)
-        self.ydot_alpha_hom = xdot_alpha(self.y_hom,self.y_old_hom,self.Dt)
+        self.y_hom = self.timeInt_sh.x
+        self.y_old_hom = self.timeInt_sh.x_old
+        self.y_alpha_hom = self.timeInt_sh.x_alpha()
+        self.ydot_old_hom = self.timeInt_sh.xdot_old
+        self.yddot_old_hom = self.timeInt_sh.xddot_old
+        self.ydot_hom = self.timeInt_sh.xdot()
+        self.ydot_alpha_hom = self.timeInt_sh.xdot_alpha()
         if(Dres_sh==None):
-            self.Dres_sh = derivative(res_sh,y_hom)
+            self.Dres_sh = derivative(self.res_sh,self.y_hom)
         else:
             self.Dres_sh = Dres_sh
         if(Dres_f==None):
-            self.Dres_f = derivative(res_f,up)
+            self.Dres_f = derivative(self.res_f,self.up)
         else:
             self.Dres_f = Dres_f
         self.x_sh = self.spline_sh.F \
@@ -257,9 +232,10 @@ class CouDALFISh:
                                                self.lam[node], n[node,:], w)
                 for j in range(0,d):
                     rhsPointSourceData[j] += [(Point(nodex[node]),-dF[j]),]
-                    # Factor of 0.5 for midpoint rule:
+                    # Factor of $\alpha_f$ for time integrator:
                     lhsPointSourceData[j] += [(Point(nodex[node]),
-                                               0.5*self.penalty*w),]
+                                               self.fluidFac
+                                               *self.penalty*w),]
 
         # Apply scalar point sources to sub-spaces corresponding to different
         # displacement components globally (but only rank 0's lists are
@@ -296,8 +272,8 @@ class CouDALFISh:
             for direction in range(0,d):
                 index = nodeToDof(node,direction)
                 bv.setValue(index,dF[direction],addv=ADD_MODE)
-                # Factor of 1/Dt for tangent of displacement problem:
-                lmVec.setValue(index,self.penalty/float(self.Dt)*w,
+                # Factor for tangent of displacement problem:
+                lmVec.setValue(index,self.penalty*self.shellFac*w,
                                addv=ADD_MODE)
         Am.setDiagonal(lmVec,addv=ADD_MODE)
         
@@ -349,12 +325,15 @@ class CouDALFISh:
             f = HDF5File(selfcomm,self.shellRestartName(restartPath,i),"w")
             f.write(self.y_old_hom,"/y_old_hom")
             f.write(self.ydot_old_hom,"/ydot_old_hom")
+            f.write(self.yddot_old_hom,"/yddot_old_hom")
             f.close()
             f = open(self.lamRestartName(restartPath,i),"wb")
             save(f,self.lam,allow_pickle=False)
             f.close()
+
         f = HDF5File(worldcomm,self.fluidRestartName(restartPath,i),"w")
         f.write(self.up_old,"/up_old")
+        f.write(self.updot_old,"/updot_old")
         f.close()
         
     def readRestarts(self,restartPath,i):
@@ -369,12 +348,15 @@ class CouDALFISh:
         f = HDF5File(selfcomm,self.shellRestartName(restartPath,i),"r")
         f.read(self.y_old_hom,"/y_old_hom")
         f.read(self.ydot_old_hom,"/ydot_old_hom")
+        f.read(self.yddot_old_hom,"/yddot_old_hom")
         f.close()
+
         f = open(self.lamRestartName(restartPath,i),"rb")
         self.lam = load(f)
         f.close()
         f = HDF5File(worldcomm,self.fluidRestartName(restartPath,i),"r")
         f.read(self.up_old,"/up_old")        
+        f.read(self.updot_old,"/updot_old")
         f.close()
         
     def takeStep(self):
@@ -382,8 +364,8 @@ class CouDALFISh:
         Advance the ``CouDALFISh`` by one time step.
         """
         # Same-velocity predictor:
-        self.y_hom.assign(self.y_old_hom + self.Dt*self.ydot_old_hom)
-        self.up.assign(self.up_old)
+        self.y_hom.assign(self.timeInt_sh.sameVelocityPredictor())
+        self.up.assign(self.timeInt_f.sameVelocityPredictor())
 
         # Explicit-in-geometry:
         yFunc = Function(self.spline_sh.V)
@@ -502,6 +484,5 @@ class CouDALFISh:
         self.updateMultipliers(nodeydot, nodeu, noden)
 
         # Move to the next time step.
-        self.ydot_old_hom.assign(self.ydot_hom)
-        self.y_old_hom.assign(self.y_hom)
-        self.up_old.assign(self.up)
+        self.timeInt_f.advance()
+        self.timeInt_sh.advance()

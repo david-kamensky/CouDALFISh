@@ -68,6 +68,8 @@ parser.add_argument('--rho0',dest='rho0',default=1.0,
                     help="Reference mass density of shell structure.")
 parser.add_argument('--C_pen',dest='C_pen',default=1.0,
                     help="Dimensionless scaling of DAL penalty.")
+parser.add_argument('--rho_infty',dest='rho_infty',default=0.0,
+                    help="Spectral radius of time integrator at Dt=infty.")
 parser.add_argument('--OUTPUT_SKIP',dest='OUTPUT_SKIP',default=1,
                     help="Write ParaView files every OUTPUT_SKIP steps.")
 parser.add_argument('--blockItTol',dest='blockItTol',default=1e-3,
@@ -94,6 +96,7 @@ rho0 = Constant(float(args.rho0))
 C_pen = Constant(float(args.C_pen))
 OUTPUT_SKIP = int(args.OUTPUT_SKIP)
 blockItTol = float(args.blockItTol)
+rho_infty = Constant(float(args.rho_infty))
 
 # Derived parameters:
 Nel_f = 3*(2**(level))
@@ -166,10 +169,7 @@ GEO_EPS = 1e8*DOLFIN_EPS
 mesh = BoxMesh(Point(-GEO_EPS,-GEO_EPS,-GEO_EPS),
                Point(L+GEO_EPS,L+GEO_EPS,H+GEO_EPS),
                Nel_f,Nel_f,1)
-VE = VectorElement("Lagrange",mesh.ufl_cell(),1)
-QE = FiniteElement("Lagrange",mesh.ufl_cell(),1)
-VQE = MixedElement([VE,QE])
-V_f = FunctionSpace(mesh,VQE)
+V_f = equalOrderSpace(mesh)
 Vscalar = FunctionSpace(mesh,"Lagrange",1)
 x_f = SpatialCoordinate(mesh)
 
@@ -271,8 +271,12 @@ def f_shell(X2):
 # Shell structure subproblem, using ShNAPr:
 y_hom = Function(spline.V)
 y_old_hom = Function(spline.V)
-y_alpha_hom = x_alpha(y_hom,y_old_hom)
 ydot_old_hom = Function(spline.V)
+yddot_old_hom = Function(spline.V)
+timeInt_sh = GeneralizedAlphaIntegrator(rho_infty,Dt,y_hom,
+                                        (y_old_hom,ydot_old_hom,yddot_old_hom),
+                                        useFirstOrderAlphaM=True)
+y_alpha_hom = timeInt_sh.x_alpha()
 z_hom = TestFunction(spline.V)
 z = spline.rationalize(z_hom)
 
@@ -282,31 +286,38 @@ Wint = surfaceEnergyDensitySVK(spline,X,x,E,nu,h_th,
                                membrane=True,
                                membranePrestress=prestress)*spline.dx
 
-yddot = spline.rationalize(xddot_alpha(y_hom,y_old_hom,ydot_old_hom,Dt))
+yddot = spline.rationalize(timeInt_sh.xddot_alpha())
 res_sh = inner(rho0*h_th*yddot - f_shell(X[1]),z)*spline.dx \
-         + dx_dx_alpha*derivative(Wint,y_hom,z_hom)
+         + (1.0/timeInt_sh.ALPHA_F)*derivative(Wint,y_hom,z_hom)
 
 # Initial condition for shell:
 ydot_old_hom.assign(spline.project(u_left(X),rationalize=False))
 
 # Fluid subproblem, using VarMINT:
+def uPart(up):
+    return as_vector([up[0],up[1],up[2]])
 up = Function(V_f)
+u = uPart(up)
 up_old = Function(V_f)
+updot_old = Function(V_f)
+timeInt_f = GeneralizedAlphaIntegrator(rho_infty,Dt,up,(up_old,updot_old))
 vq = TestFunction(V_f)
 
 dx = dx(metadata={"quadrature_degree":femQuadDeg})
 ds = ds(metadata={"quadrature_degree":femQuadDeg})
-u,p = split(up)
-u_old,_ = split(up_old)
 v,q = split(vq)
-u_alpha = x_alpha(u,u_old)
-u_t_alpha = xdot_alpha(u,u_old,Dt)
+up_alpha = timeInt_f.x_alpha()
+updot_alpha = timeInt_f.xdot_alpha()
+u_alpha = uPart(up_alpha)
+p = up[3]
+u_t_alpha = uPart(updot_alpha)
 cutFunc = Function(Vscalar)
 f_f,_ = strongResidual(u_exact(x_f),p_exact(x_f),mu,rho,u_t=u_t_exact(x_f))
 f_f /= rho
 res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,
                          u_t=u_t_alpha,Dt=Dt,dx=dx,f=f_f,
                          stabScale=stabScale(cutFunc,stabEps))
+
 # Flag vertical sides for weakBCs:
 weakBCDomain = CompiledSubDomain("x[0]<0.0 || x[0]>"+str(L)
                                  +" || x[1]<0.0 || x[1]>"+str(L))
@@ -330,9 +341,9 @@ ue = u_exact(x_f)
 up_old.assign(project(as_vector([ue[0],ue[1],ue[2],p_exact(x_f)]),V_f))
 
 # Coupling with CouDALFISh:
-fsiProblem = CouDALFISh(mesh,res_f,up,up_old,
-                        spline,res_sh,y_hom,y_old_hom,ydot_old_hom,
-                        Dt,penalty,
+fsiProblem = CouDALFISh(mesh,res_f,timeInt_f,
+                        spline,res_sh,timeInt_sh,
+                        penalty,
                         bcs_f=bcs_f,
                         blockItTol=blockItTol,cutFunc=cutFunc,
                         r=0.0)
@@ -361,7 +372,7 @@ uFile = File("results/u.pvd")
 pFile = File("results/p.pvd")
 
 # Time stepping loop:
-t.t = 0.5*float(Dt)
+t.t = float(timeInt_f.ALPHA_F)*float(Dt)
 for timeStep in range(0,N_steps):
     
     if(mpirank==0):
