@@ -48,8 +48,10 @@ class CouDALFISh:
         coupling terms.  ``spline_sh`` and ``res_sh`` are the shell structure's
         ``ExtractedSpline`` and residual (again without coupling terms). The
         arguments ``timeInt_sh`` and ``timeInt_f`` are ``tIGAr`` 
-        generalized-alpha integrators for the shell and fluid.  
-        ``penalty`` is the implicit velocity penalty.  
+        generalized-alpha integrators for the shell and fluid.  ``Function``
+        objects for the current and previous solution states are accessed 
+        through these time integrators.  ``penalty`` is the implicit velocity 
+        penalty from the DAL method.  
 
         The optional parameter ``r`` is the stabilization parameter denoted
         by the same character in this paper:
@@ -304,8 +306,8 @@ class CouDALFISh:
         multiPointSources = PointSource(self.Vscalar_f,pointSourceData)
         multiPointSources.apply(self.cutFunc.vector())
 
-    # These are mainly for internal use, because the file names must match
-    # when reading and writing.
+    # These are mainly for internal use, just to ensure that file names
+    # match when reading and writing restart data.
     def fluidRestartName(self,restartPath,i):
         return restartPath+"/restart_f."+str(i)+".h5"
     def shellRestartName(self,restartPath,i):
