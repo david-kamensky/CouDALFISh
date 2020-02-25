@@ -5,7 +5,8 @@
 title = "Open-source immersogeometric fluid--structure interaction analysis using {FEniCS} and {tIGAr}",
 journal = "Computers \& Mathematics With Applications",
 author = "D. Kamensky",
-note = "Accepted"
+doi = "https://doi.org/10.1016/j.camwa.2020.01.023",
+note = "In press"
 }
 ```
 It serves to illustrate advanced usage of tIGAr and FEniCS, and demonstrates that automated code generation can still be useful in development of custom applications where certain functionality is still implemented manually.
