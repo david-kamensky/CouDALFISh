@@ -9,6 +9,7 @@ fieldof a shell structure, discretized using the ``ShNAPr`` library for
 on the dynamic augmented Lagrangian (DAL) method.
 """
 
+import numpy as np
 from ShNAPr.kinematics import *
 from ShNAPr.contact import *
 from mpi4py import MPI as pyMPI
@@ -17,6 +18,7 @@ from tIGAr.timeIntegration import *
 
 # This module assumes 3D problems:
 d = 3
+ADD_MODE = PETSc.InsertMode.ADD
 
 def stabScale(cutFunc,eps):
     """
@@ -39,7 +41,7 @@ class CouDALFISh:
                  blockItTol=1e-3, blockIts=100,
                  bcs_f=[],
                  Dres_f=None, Dres_sh=None,
-                 contactContext_sh=None,
+                 contactContext_sh=None, nonmatching_sh=None,
                  fluidLinearSolver=PETScLUSolver("mumps"),
                  cutFunc=None):
         """
@@ -77,6 +79,8 @@ class CouDALFISh:
         may be used in the residual ``res_f``, to scale SUPG/PSPG/LSIC
         stabilization parameters.
         """
+
+        # Fluid related attributes
         self.mesh_f = mesh_f
         self.timeInt_f = timeInt_f
         self.fluidFac = float(self.timeInt_f.ALPHA_F)
@@ -85,21 +89,47 @@ class CouDALFISh:
         self.updot_old = self.timeInt_f.xdot_old
         self.up_alpha = self.timeInt_f.x_alpha()
         self.V_f = self.up.function_space()
+
+        # Shell related attributes
         self.spline_sh = spline_sh
+        if isinstance(self.spline_sh, list):
+            self.spline_shs = self.spline_sh
+            self.multiPatch = True
+        elif isinstance(self.spline_sh, ExtractedSpline):
+            self.spline_shs = [self.spline_sh]
+            self.multiPatch = False
+        else:
+            raise TypeError("Spline type " + Type(self.spline) 
+                            + " is not supported.")
+        self.num_splines = len(self.spline_shs)
+
         self.penalty = penalty
         self.Dt = self.timeInt_f.DELTA_T
         self.timeInt_sh = timeInt_sh
-        if(self.timeInt_sh.systemOrder == 2):
-            fac = float(self.timeInt_sh.ALPHA_F)*float(self.timeInt_sh.GAMMA)\
-                  /(float(self.timeInt_sh.BETA)*float(self.Dt))
+        if self.multiPatch:
+            if not isinstance(self.timeInt_sh, list):
+                raise Type("``timeInt_sh`` has to be type of list, "
+                           "same as the type of input ``spline_sh``")
+            self.timeInt_shs = self.timeInt_sh
         else:
-            fac = float(self.timeInt_sh.ALPHA_F)\
-                  /(float(self.timeInt_sh.GAMMA)*float(self.Dt))
-        self.shellFac = fac
+            self.timeInt_shs = [self.timeInt_sh]
+
+        self.shellFacs = []
+        for i in range(self.num_splines):
+            if self.timeInt_shs[i].systemOrder == 2:
+                fac = float(self.timeInt_shs[i].ALPHA_F)\
+                    *float(self.timeInt_shs[i].GAMMA)\
+                    /(float(self.timeInt_shs[i].BETA)*float(self.Dt))
+            else:
+                fac = float(self.timeInt_shs[i].ALPHA_F)\
+                    /(float(self.timeInt_shs[i].GAMMA)*float(self.Dt))
+            self.shellFacs += [fac,]
+
         self.blockIts = blockIts
         self.blockItTol = blockItTol
         self.bcs_f = bcs_f
-        if(contactContext_sh==None):
+
+        if contactContext_sh is None:
             # If no contact context is passed, assume that contact is not
             # part of this FSI problem, and create a dummy context for the
             # nodal quadrature rule.  (Attempting to call ``assembleContact``
@@ -111,31 +141,73 @@ class CouDALFISh:
         else:
             self.includeContact_sh = True
             self.contactContext_sh = contactContext_sh
-        self.nNodes_sh = self.contactContext_sh.nNodes
-        self.nodeX_sh = self.contactContext_sh.nodeX
+
+        self.nNodes_shs = self.contactContext_sh.nNodes
+        self.nodeX_shs = self.contactContext_sh.nodeXs
         self.r = r
-        self.lam = zeros(self.nNodes_sh)
+        if not self.multiPatch:
+            self.lam = zeros(self.nNodes_shs[0])
+            self.lam_old = zeros(self.nNodes_shs[0])
+        self.lams = [zeros(nNodes) for nNodes in self.nNodes_shs]
+
         self.res_f = res_f
         self.res_sh = res_sh
-        self.y_hom = self.timeInt_sh.x
-        self.y_old_hom = self.timeInt_sh.x_old
-        self.y_alpha_hom = self.timeInt_sh.x_alpha()
-        self.ydot_old_hom = self.timeInt_sh.xdot_old
-        self.yddot_old_hom = self.timeInt_sh.xddot_old
-        self.ydot_hom = self.timeInt_sh.xdot()
-        self.ydot_alpha_hom = self.timeInt_sh.xdot_alpha()
-        if(Dres_sh==None):
-            self.Dres_sh = derivative(self.res_sh,self.y_hom)
+        if self.multiPatch:
+            if not isinstance(self.res_sh, list):
+                raise Type("``res_sh`` has to be type of list, "
+                           "same as the type of input ``spline_sh``")
+            self.res_shs = self.res_sh
         else:
-            self.Dres_sh = Dres_sh
-        if(Dres_f==None):
+            self.res_shs = [self.res_sh]
+
+        self.y_homs = [self.timeInt_shs[i].x for i in range(self.num_splines)]
+        self.y_old_homs = [self.timeInt_shs[i].x_old 
+                           for i in range(self.num_splines)]
+        self.y_alpha_homs = [self.timeInt_shs[i].x_alpha() 
+                             for i in range(self.num_splines)]
+        self.ydot_old_homs = [self.timeInt_shs[i].xdot_old 
+                              for i in range(self.num_splines)]
+        self.yddot_old_homs = [self.timeInt_shs[i].xddot_old 
+                               for i in range(self.num_splines)]
+        self.ydot_homs = [self.timeInt_shs[i].xdot() 
+                          for i in range(self.num_splines)]
+        self.ydot_alpha_homs = [self.timeInt_shs[i].xdot_alpha() 
+                                for i in range(self.num_splines)]
+
+        if Dres_f is None:
             self.Dres_f = derivative(self.res_f,self.up)
         else:
             self.Dres_f = Dres_f
-        self.x_sh = self.spline_sh.F \
-                    + self.spline_sh.rationalize(self.y_alpha_hom)
+
+        if Dres_sh is None:
+            self.Dres_shs = [derivative(self.res_shs[i], self.y_homs[i]) 
+                             for i in range(self.num_splines)]
+        else:
+            if self.multiPatch:
+                if not isinstance(self.Dres_sh, list):
+                    raise Type("``Dres_sh`` has to be type of list, "
+                               "same as the type of input ``spline_sh``")
+                self.Dres_shs = self.Dres_sh
+            else:
+                self.Dres_shs = [self.Dres_sh]
+
+        self.nonmatching_sh = nonmatching_sh
+        if self.nonmatching_sh is not None:
+            # Set residuals for non-matching problem
+            if self.nonmatching_sh.residuals is None:
+                self.nonmatching_sh.set_residuals(self.res_shs, self.Dres_shs)
+            # If both the non-matching problem and FSI problem have
+            # contact, set the contact in non-matching problem as None
+            # in order to avoid adding the contact contributions twice. 
+            if self.nonmatching_sh.contact is not None and \
+                self.includeContact_sh is True:
+                self.nonmatching_sh.contact = None
+
+        self.x_shs = [self.spline_shs[i].F 
+                      + self.spline_shs[i].rationalize(self.y_alpha_homs[i]) 
+                      for i in range(self.num_splines)]
         
-        if(cutFunc==None):
+        if cutFunc is None:
             self.Vscalar_f = FunctionSpace(mesh_f,"CG",1)
             self.cutFunc = Function(self.Vscalar_f)
             if(mpirank==0):
@@ -148,11 +220,14 @@ class CouDALFISh:
             self.Vscalar_f = cutFunc.function_space()
 
         # UFL expression for shell normal:
-        _,_,self.a2_sh,_,_,_ = surfaceGeometry(self.spline_sh,self.x_sh)
+        self.a2_shs = []
+        for i in range(self.num_splines):
+            _,_,a2_sh,_,_,_ = surfaceGeometry(self.spline_shs[i], 
+                                              self.x_shs[i])
+            self.a2_shs += [a2_sh,]
         
         # Nodal normal field:
-        self.n_nodal_sh = Function(self.spline_sh.V)
-
+        self.n_nodal_shs = [Function(sh.V) for sh in self.spline_shs]
         self.fluidLinearSolver = fluidLinearSolver
         
     def updateNodalNormals(self):
@@ -161,9 +236,10 @@ class CouDALFISh:
         onto the (homogeneous) spline space for the displacement via a lumped
         ``$L^2$`` projection.
         """
-        self.n_nodal_sh.assign(self.spline_sh.project(self.a2_sh,
-                                                      lumpMass=True,
-                                                      rationalize=False))
+        for i in range(self.num_splines):
+            self.n_nodal_shs[i].assign(self.spline_shs[i].project(
+                self.a2_shs[i], lumpMass=True, rationalize=False))
+
     def pointInFluidMesh(self,x):
         """
         Returns a Boolean indicating whether or not the point ``x`` is in
@@ -182,19 +258,20 @@ class CouDALFISh:
             return up(x)[0:d]
         else:
             return d*(0.0,)
-        
-    def evalFluidVelocities(self,up,nodex):
+
+    def evalFluidVelocities(self,up,nodexs):
         """
-        Given an array of points, ``nodex``, this returns a same-shape array
-        of velocity evaluations from the fluid solution space function ``up``.
-        The array returned is the same on all MPI tasks.  For points from 
-        ``nodex`` that are not on any task's mesh partition, the corresponding
-        velocity is zero.
+        Given a list of array of points, ``nodexs``, this returns a 
+        same-shape array of velocity evaluations from the fluid solution 
+        space function ``up``. The array returned is the same on all MPI 
+        tasks. For points from ``nodexs`` that are not on any task's mesh 
+        partition, the corresponding velocity is zero.
         """
-        uFe = zeros((self.nNodes_sh,d))
-        for i in range(0,self.nNodes_sh):
-            uFe[i,:] = self.evalFluidVelocity(up,nodex[i,:])
-        uFe = worldcomm.allreduce(uFe,op=pyMPI.SUM)
+        uFe = [zeros((nNodes, d)) for nNodes in self.nNodes_shs]
+        for i in range(0, self.num_splines):
+            for j in range(0, self.nNodes_shs[i]):
+                uFe[i][j,:] = self.evalFluidVelocity(up, nodexs[i][j,:])
+            uFe[i] = worldcomm.allreduce(uFe[i], op=pyMPI.SUM)
         return uFe        
 
     def couplingForceOnFluid(self,u,ydot,lam,n,w):
@@ -207,12 +284,13 @@ class CouDALFISh:
         """
         return -(self.penalty*(u-ydot) + lam*n)*w
     
-    def addFluidCouplingForces(self, u_sh, u_f, nodex, n, A, b):
+    def addFluidCouplingForces(self, u_shs, u_fs, nodexs, ns, A, b):
         """
-        Given arrays of shell structure velocities ``u_sh``, fluid velocities,
-        ``u_f``, positions, ``nodex``, and normals ``n`` at FE nodes of the
-        shell structure's mesh, compute coupling forces and apply them to
-        fluid LHS and RHS matrix and vector ``A`` and ``b``.  
+        Given arrays of shell structure velocities ``u_shs``, fluid 
+        velocities, ``u_fs``, positions, ``nodexs``, and normals ``ns`` 
+        at FE nodes of the shell structure's mesh, compute coupling 
+        forces and apply them to fluid LHS and RHS matrix and vector 
+        ``A`` and ``b``.  
         """
         rhsMultiPointSources = []
         lhsMultiPointSources = []
@@ -224,20 +302,23 @@ class CouDALFISh:
 
         # Add point source data to lists in serial
         if(mpirank == 0):
-            for node in range(0,self.nNodes_sh):
+            for i in range(self.num_splines):
+                for node in range(0,self.nNodes_shs[i]):
+                    # Quadrature weight
+                    w = self.contactContext_sh.quadWeights[i][node]
 
-                # Quadrature weight
-                w = self.contactContext_sh.quadWeights[node]
-
-                # Get node's contribution to total force
-                dF = self.couplingForceOnFluid(u_f[node,:], u_sh[node,:],
-                                               self.lam[node], n[node,:], w)
-                for j in range(0,d):
-                    rhsPointSourceData[j] += [(Point(nodex[node]),-dF[j]),]
-                    # Factor of $\alpha_f$ for time integrator:
-                    lhsPointSourceData[j] += [(Point(nodex[node]),
-                                               self.fluidFac
-                                               *self.penalty*w),]
+                    # Get node's contribution to total force
+                    dF = self.couplingForceOnFluid(u_fs[i][node,:], 
+                                                   u_shs[i][node,:],
+                                                   self.lams[i][node], 
+                                                   ns[i][node,:], w)
+                    for j in range(0,d):
+                        rhsPointSourceData[j] += [(Point(nodexs[i][node]),
+                                                   -dF[j]),]
+                        # Factor of $\alpha_f$ for time integrator:
+                        lhsPointSourceData[j] += [(Point(nodexs[i][node]),
+                                                   self.fluidFac
+                                                   *self.penalty*w),]
 
         # Apply scalar point sources to sub-spaces corresponding to different
         # displacement components globally (but only rank 0's lists are
@@ -254,109 +335,124 @@ class CouDALFISh:
             rhsMultiPointSources[i].apply(b)
             lhsMultiPointSources[i].apply(lmVec)
         as_backend_type(A).mat().setDiagonal(as_backend_type(lmVec).vec(),
-                                             addv=PETSc.InsertMode.ADD)
+                                             addv=ADD_MODE)
 
-    def addShellCouplingForces(self, u_sh, u_f, n, A, b):
+    def addShellCouplingForces(self, u_shs, u_fs, ns, Ams, bvs):
         """
-        Given arrays of shell structure velocities ``u_sh``, fluid velocities
-        ``u_f``, and normal vectors ``n`` at FE nodes of the shell structure
-        mesh, compute coupling forces and add corresponding contributions
-        to shell structure LHS and RHS matrix and vector ``A`` and ``b``.
+        Given arrays of shell structure velocities ``u_shs``, fluid velocities
+        ``u_fs``, and normal vectors ``ns`` at FE nodes of the shell structure
+        mesh, compute coupling forces and add corresponding contributions to 
+        shell structure LHS and RHS matrices and vectors ``Ams`` and ``bvs``.
         """
-        ADD_MODE = PETSc.InsertMode.ADD
-        Am = as_backend_type(A).mat()
-        bv = as_backend_type(b).vec()
-        lmVec = as_backend_type(Function(self.spline_sh.V).vector()).vec()
-        for node in range(0,self.nNodes_sh):
-            w = self.contactContext_sh.quadWeights[node]
-            dF = self.couplingForceOnFluid(u_f[node,:], u_sh[node,:],
-                                           self.lam[node], n[node,:], w)
-            for direction in range(0,d):
-                index = nodeToDof(node,direction)
-                bv.setValue(index,dF[direction],addv=ADD_MODE)
-                # Factor for tangent of displacement problem:
-                lmVec.setValue(index,self.penalty*self.shellFac*w,
-                               addv=ADD_MODE)
-        Am.setDiagonal(lmVec,addv=ADD_MODE)
+        for i in range(self.num_splines):
+            lmVec = as_backend_type(Function(self.spline_shs[i].V)
+                                    .vector()).vec()
+            for node in range(0, self.nNodes_shs[i]):
+                w = self.contactContext_sh.quadWeights[i][node]
+                dF = self.couplingForceOnFluid(u_fs[i][node,:], 
+                                               u_shs[i][node,:],
+                                               self.lams[i][node],
+                                               ns[i][node,:], w)
+                for direction in range(0,d):
+                    index = nodeToDof(node, direction)
+                    bvs[i].setValue(index, dF[direction], addv=ADD_MODE)
+                    # Factor for tangent of displacement problem:
+                    lmVec.setValue(index, self.penalty*self.shellFacs[i]*w,
+                                   addv=ADD_MODE)
+            Ams[i][i].setDiagonal(lmVec, addv=ADD_MODE)
         
-    def updateMultipliers(self, u_sh, u_f, n):
+    def updateMultipliers(self, u_shs, u_fs, ns):
         """
-        Given arrays of shell structure velocities ``u_sh``, fluid velocities
-        ``u_f``, and normal vectors ``n`` at nodes of the shell structure
+        Given arrays of shell structure velocities ``u_shs``, fluid velocities
+        ``u_fs``, and normal vectors ``ns`` at nodes of the shell structure
         FE mesh, update the corresponding FSI Lagrange multiplier samples in
-        ``self.lam``.  
+        ``self.lams``.  
         """
-        for node in range(0,self.nNodes_sh):
-            contrib = 0.0
-            for j in range(0,d):
-                contrib += self.penalty*(u_f[node,j] - u_sh[node,j])*n[node,j]
-            self.lam[node] = (self.lam[node] + contrib)/(1.0 + self.r)
+        for i in range(self.num_splines):
+            for node in range(0, self.nNodes_shs[i]):
+                contrib = 0.
+                for j in range(d):
+                    contrib += self.penalty*(u_fs[i][node,j] \
+                             - u_shs[i][node,j])*ns[i][node,j]
+                self.lams[i][node] = (self.lams[i][node]+contrib)/(1.0+self.r)
 
-    def updateStabScale(self,nodex):
+
+    def updateStabScale(self,nodexs):
         """
-        Given an array ``nodex`` of immersed structure nodal positions,
+        Given an array ``nodexs`` of immersed structure nodal positions,
         this function updates ``self.cutFunc``, whose nonzero 
         values indicate elements near the immersed structure.  
         """
         self.cutFunc.assign(Function(self.Vscalar_f))
         pointSourceData = []
-        if(mpirank == 0):
-            for point in range(0,self.nNodes_sh):
-                pointSourceData += [(Point(nodex[point]),1.0),]
-        multiPointSources = PointSource(self.Vscalar_f,pointSourceData)
-        multiPointSources.apply(self.cutFunc.vector())
+        for i in range(self.num_splines):
+            if (mpirank == 0):
+                for point in range(0, self.nNodes_shs[i]):
+                    pointSourceData += [(Point(nodexs[i][point]), 1.0),]
+        multiPointSouces = PointSource(self.Vscalar_f, pointSourceData)
+        multiPointSouces.apply(self.cutFunc.vector())
+
 
     # These are mainly for internal use, just to ensure that file names
     # match when reading and writing restart data.
-    def fluidRestartName(self,restartPath,i):
-        return restartPath+"/restart_f."+str(i)+".h5"
-    def shellRestartName(self,restartPath,i):
-        return restartPath+"/restart_sh."+str(i)+".h5"
-    def lamRestartName(self,restartPath,i):
-        return restartPath+"/restart_lam."+str(i)+".npy"
+    def fluidRestartName(self,restartPath,timeStep):
+        return restartPath+"/restart_f."+str(timeStep)+".h5"
 
-    def writeRestarts(self,restartPath,i):
+    def shellRestartName(self,restartPath,shInd,timeStep):
+        return restartPath+"/restart_sh_"+str(shInd)+"."+str(timeStep)+".h5"
+        
+    def lamRestartName(self,restartPath,shInd,timeStep):
+        return restartPath+"/restart_lam_"+str(shInd)+"."+str(timeStep)+".npy"
+
+    def writeRestarts(self,restartPath,timeStep):
         """
-        Write out all data needed to restart the computation from step ``i``, 
-        where ``restartPath`` is the path to a directory containing restart
-        files for all time steps.  This should be called before
-        ``self.takeStep()`` within a typical time stepping loop.
+        Write out all data needed to restart the computation from step 
+        ``timeStep``, where ``restartPath`` is the path to a directory 
+        containing restart files for all time steps.  This should be 
+        called before ``self.takeStep()`` within a typical time stepping 
+        loop.
         """
         # Only the master task writes shell restarts.
         if(mpirank==0):
-            f = HDF5File(selfcomm,self.shellRestartName(restartPath,i),"w")
-            f.write(self.y_old_hom,"/y_old_hom")
-            f.write(self.ydot_old_hom,"/ydot_old_hom")
-            f.write(self.yddot_old_hom,"/yddot_old_hom")
-            f.close()
-            f = open(self.lamRestartName(restartPath,i),"wb")
-            save(f,self.lam,allow_pickle=False)
-            f.close()
+            for i in range(self.num_splines):
+                f = HDF5File(selfcomm, self.shellRestartName(
+                    restartPath,i,timeStep), "w")
+                f.write(self.y_old_homs[i], "/y_old_hom_"+str(i))
+                f.write(self.ydot_old_homs[i], "/ydot_old_hom_"+str(i))
+                f.write(self.yddot_old_homs[i], "/yddot_old_hom_"+str(i))
+                f.close()
+                f = open(self.lamRestartName(restartPath,i,timeStep), "wb")
+                save(f,self.lams[i],allow_pickle=False)
+                f.close()
 
-        f = HDF5File(worldcomm,self.fluidRestartName(restartPath,i),"w")
+        f = HDF5File(worldcomm, 
+                     self.fluidRestartName(restartPath,timeStep),"w")
         f.write(self.up_old,"/up_old")
         f.write(self.updot_old,"/updot_old")
         f.close()
         
-    def readRestarts(self,restartPath,i):
+    def readRestarts(self,restartPath,timeStep):
         """
-        Read in data needed to restart the computation from step ``i``, 
+        Read in data needed to restart the computation from step ``timeStep``, 
         where ``restartPath`` is the path to a directory containing restart
         files for all time steps.  This should be called prior to the 
-        beginning of the time stepping loop, with ``i`` equal to the index
-        of the first time step to be executed.
+        beginning of the time stepping loop, with ``timeStep`` equal to the 
+        index of the first time step to be executed.
         """
         # Each task reads a copy of the shell state on its self communicator.
-        f = HDF5File(selfcomm,self.shellRestartName(restartPath,i),"r")
-        f.read(self.y_old_hom,"/y_old_hom")
-        f.read(self.ydot_old_hom,"/ydot_old_hom")
-        f.read(self.yddot_old_hom,"/yddot_old_hom")
-        f.close()
+        for i in range(self.num_splines):
+            f = HDF5File(selfcomm, 
+                         self.shellRestartName(restartPath,i,timeStep),"r")
+            f.read(self.y_old_homs[i],"/y_old_hom_"+str(i))
+            f.read(self.ydot_old_homs[i],"/ydot_old_hom_"+str(i))
+            f.read(self.yddot_old_homs[i],"/yddot_old_hom_"+str(i))
+            f.close()
+            f = open(self.lamRestartName(restartPath,i,timeStep),"rb")
+            self.lams[i] = load(f)
+            f.close()
 
-        f = open(self.lamRestartName(restartPath,i),"rb")
-        self.lam = load(f)
-        f.close()
-        f = HDF5File(worldcomm,self.fluidRestartName(restartPath,i),"r")
+        f = HDF5File(worldcomm, 
+                     self.fluidRestartName(restartPath,timeStep),"r")
         f.read(self.up_old,"/up_old")        
         f.read(self.updot_old,"/updot_old")
         f.close()
@@ -365,15 +461,30 @@ class CouDALFISh:
         """
         Advance the ``CouDALFISh`` by one time step.
         """
+        if not self.multiPatch:
+            # For single extracted spline case, if the initial condition 
+            # (0 s) for Lagrange multiplier ``self.lam`` is changed, change 
+            # the list of Lagrange multipliers ``self.lams`` as well. This 
+            # code is to keep backward compatibility for existing demo 
+            # ``manufacturedSolution``.
+            if np.linalg.norm(self.lam - self.lam_old) != 0:
+                self.lam_old = np.copy(self.lam)
+                self.lams[0] = self.lam
+
         # Same-velocity predictor:
-        self.y_hom.assign(self.timeInt_sh.sameVelocityPredictor())
+        for i in range(self.num_splines):
+            self.y_homs[i].assign(self.timeInt_shs[i].sameVelocityPredictor())
         self.up.assign(self.timeInt_f.sameVelocityPredictor())
 
         # Explicit-in-geometry:
-        yFunc = Function(self.spline_sh.V)
-        yFunc.assign(self.y_alpha_hom)
-        nodex = self.nodeX_sh + self.contactContext_sh.evalFunction(yFunc)
-        self.updateStabScale(nodex)
+        yFuncs = []
+        nodexs = []
+        for i in range(self.num_splines):
+            yFuncs += [Function(self.spline_shs[i].V),]
+            yFuncs[i].assign(self.y_alpha_homs[i])
+            nodexs += [self.nodeX_shs[i] 
+                       + self.contactContext_sh.evalFunction(yFuncs[i],i)]
+        self.updateStabScale(nodexs)
 
         # Block iteration:
         Fnorm_sh0 = -1.0
@@ -386,13 +497,22 @@ class CouDALFISh:
             # Add fluid's FSI coupling terms
             upFunc = Function(self.V_f)
             upFunc.assign(self.up_alpha)
-            nodeu = self.evalFluidVelocities(upFunc,nodex)
-            ydotFunc = Function(self.spline_sh.V)
-            ydotFunc.assign(self.ydot_alpha_hom)
-            nodeydot = self.contactContext_sh.evalFunction(ydotFunc)
+            nodeus = self.evalFluidVelocities(upFunc, nodexs)
+
+            ydotFuncs = []
+            nodeydots = []
+            for i in range(self.num_splines):
+                ydotFuncs += [Function(self.spline_shs[i].V),]
+                ydotFuncs[i].assign(self.ydot_alpha_homs[i])
+                nodeydots += [self.contactContext_sh
+                              .evalFunction(ydotFuncs[i],i)]
+
             self.updateNodalNormals()
-            noden = self.contactContext_sh.evalFunction(self.n_nodal_sh)
-            self.addFluidCouplingForces(nodeydot, nodeu, nodex, noden,
+            nodens = []
+            for i in range(self.num_splines):
+                nodens += [self.contactContext_sh
+                           .evalFunction(self.n_nodal_shs[i],i)]
+            self.addFluidCouplingForces(nodeydots, nodeus, nodexs, nodens,
                                         K_f, F_f)
             # Apply fluid BCs
             for bc in self.bcs_f:
@@ -410,32 +530,97 @@ class CouDALFISh:
             self.up.assign(self.up - dup)
 
             # Assemble the structure subproblem
-            K_sh = assemble(self.Dres_sh)
-            F_sh = assemble(self.res_sh)
+            if self.nonmatching_sh is not None:
+                Ks_FE, Fs_FE = self.nonmatching_sh.assemble_nonmatching()
+             
+            else:
+                Fs_FE = [None for i in range(self.num_splines)]
+                Ks_FE = [[None for i in range(self.num_splines)]
+                         for j in range(self.num_splines)]
+                for i in range(self.num_splines):
+                    Fs_FE[i] = as_backend_type(assemble(self.res_shs[i]))\
+                               .vec()
+                    Ks_FE[i][i] = as_backend_type(assemble(self.Dres_shs[i]))\
+                                  .mat()
 
             # Next, add on the contact contributions, assembled using the
             # function defined above.
-            if(self.includeContact_sh):
-                yFunc = Function(self.spline_sh.V)
-                yFunc.assign(self.y_alpha_hom)
-                Kc, Fc = self.contactContext_sh.assembleContact(yFunc)
-                K_sh += Kc
-                F_sh += Fc
+            if self.includeContact_sh is True:
+                yFuncs = []
+                for i in range(self.num_splines):
+                    yFuncs += [Function(self.spline_shs[i].V),]
+                    yFuncs[i].assign(self.y_alpha_homs[i])
+                Kcs_FE, Fcs_FE = self.contactContext_sh\
+                                 .assembleContact(yFuncs, output_PETSc=True)
+                if self.multiPatch:
+                    for i in range(self.num_splines):
+                        if Fcs_FE[i] is not None:
+                            Fs_FE[i] += Fcs_FE[i]
+                        for j in range(self.num_splines):
+                            if Ks_FE[i][j] is None:
+                                Ks_FE[i][j] = Kcs_FE[i][j]
+                            elif Ks_FE[i][j] is not None and \
+                                Kcs_FE[i][j] is not None:
+                                Ks_FE[i][j] += Kcs_FE[i][j]
+                else:
+                    if Fcs_FE is not None:
+                        Fs_FE[0] += Fcs_FE
+                        Ks_FE[0][0] += Kcs_FE
 
             # Add the structure's FSI coupling forces
             upFunc = Function(self.V_f)
             upFunc.assign(self.up_alpha)
-            nodeu = self.evalFluidVelocities(upFunc,nodex)
-            self.addShellCouplingForces(nodeydot, nodeu, noden, K_sh, F_sh)
+            nodeus = self.evalFluidVelocities(upFunc, nodexs)
+            self.addShellCouplingForces(nodeydots, nodeus, nodens, 
+                                        Ks_FE, Fs_FE)
 
             # Apply the extraction to an IGA function space.  (This applies
             # the Dirichlet BCs on the IGA unknowns.)
-            MTKM_sh = self.spline_sh.extractMatrix(K_sh)
-            MTF_sh = self.spline_sh.extractVector(F_sh)
+            MTF_sh_list = [None for i in range(self.num_splines)]
+            MTKM_sh_list = [[None for i in range(self.num_splines)]
+                            for j in range(self.num_splines)]
+            for i in range(self.num_splines):
+                MTF_sh_list[i] = as_backend_type(self.spline_shs[i].\
+                                 extractVector(PETScVector(Fs_FE[i]))).vec()
+                for j in range(self.num_splines):
+                    if i == j:
+                        MTKM_sh_list[i][i] = as_backend_type(
+                            self.spline_shs[i].extractMatrix(
+                            PETScMatrix(Ks_FE[i][i]))).mat()
+                    else:
+                        if Ks_FE[i][j] is not None:
+                            MTKM_sh_list[i][j] = as_backend_type(
+                                self.spline_shs[i].M).mat().transposeMatMult(
+                                Ks_FE[i][j]).matMult(as_backend_type(
+                                self.spline_shs[j].M).mat())
+
+                            MTKM_sh_list[i][j].zeroRows(
+                                self.spline_shs[i].zeroDofs, diag=0)
+                            MTKM_sh_list[i][j].transpose()
+                            MTKM_sh_list[i][j].zeroRows(
+                                self.spline_shs[j].zeroDofs, diag=0)
+                            MTKM_sh_list[i][j].transpose()
+                            MTKM_sh_list[i][j].assemblyBegin()
+                            MTKM_sh_list[i][j].assemblyEnd()
+
+            if self.multiPatch:
+                MTF_sh = PETSc.Vec(self.spline_shs[0].comm)
+                MTF_sh.createNest(MTF_sh_list, comm=self.spline_shs[0].comm)
+                MTF_sh.setUp()
+                MTF_sh.assemble()
+                MTKM_sh = PETSc.Mat(self.spline_shs[0].comm)
+                MTKM_sh.createNest(MTKM_sh_list, comm=self.spline_shs[0].comm)
+                MTKM_sh.setUp()
+                MTKM_sh.assemble()
+                MTKM_sh.convert('seqaij')
+            else:
+                MTF_sh = MTF_sh_list[0]
+                MTKM_sh = MTKM_sh_list[0][0]
 
             # Check the nonlinear residual.
-            Fnorm_sh = norm(MTF_sh)
+            Fnorm_sh = MTF_sh.norm()
             Fnorm_f = norm(F_f)
+
             if(blockIt==0):
                 Fnorm_f0 = Fnorm_f
             relNorm_f = Fnorm_f/Fnorm_f0
@@ -465,9 +650,56 @@ class CouDALFISh:
 
             # Solve for the nonlinear increment, and add it to the current
             # solution guess.  (Applies BCs)
-            dy_hom = Function(self.spline_sh.V)
-            self.spline_sh.solveLinearSystem(MTKM_sh,MTF_sh,dy_hom)
-            self.y_hom.assign(self.y_hom-dy_hom)
+            if self.multiPatch:
+                dy_list = []
+                dy_IGA_list = []
+                for i in range(len(self.spline_shs)):
+                    dy_list += [Function(self.spline_shs[i].V),]
+                    dy_IGA = PETSc.Vec(self.spline_shs[i].comm)
+                    dy_IGA.createSeq(self.spline_shs[i].M.size(1), 
+                                     comm=self.spline_shs[i].comm)
+                    dy_IGA.setUp()
+                    dy_IGA.assemble()
+                    dy_IGA_list += [dy_IGA,]
+
+                dy = PETSc.Vec(self.spline_shs[0].comm)
+                dy.createNest(dy_IGA_list, comm=self.spline_shs[0].comm)
+                dy.setUp()
+                dy.assemble()
+            else:
+                dyFunc = Function(self.spline_shs[0].V)
+                dy = PETSc.Vec(self.spline_shs[i].comm)
+                dy.createSeq(self.spline_shs[i].M.size(1), 
+                             comm=self.spline_shs[i].comm)
+                dy.setUp()
+                dy.assemble()
+
+            solve(PETScMatrix(MTKM_sh), PETScVector(dy), PETScVector(MTF_sh))
+
+            if self.multiPatch:
+                for i in range(self.num_splines):
+                    self.spline_shs[i].M.mat().mult(dy_IGA_list[i], 
+                                                    dy_list[i].vector().vec())
+                    as_backend_type(dy_list[i].vector()).vec().ghostUpdate()
+                    as_backend_type(dy_list[i].vector()).vec().assemble()
+                    self.y_homs[i].assign(self.y_homs[i] - dy_list[i])
+                # Update mortar meshes' functions
+                if self.nonmatching_sh is not None:
+                    for i in range(len(
+                        self.nonmatching_sh.transfer_matrices_list)):
+                        for j in range(len(
+                            self.nonmatching_sh.transfer_matrices_list[i])):
+                            for k in range(len(self.nonmatching_sh.\
+                                transfer_matrices_list[i][j])):
+                                self.nonmatching_sh.transfer_matrices_list\
+                                    [i][j][k].mat().mult(self.y_homs\
+                                    [self.nonmatching_sh.mapping_list[i][j]].\
+                                    vector().vec(), 
+                                    self.nonmatching_sh.mortar_vars[i][j][k].\
+                                    vector().vec())
+            else:
+                self.spline_shs[0].M.mat().mult(dy, dyFunc.vector().vec())
+                self.y_homs[0].assign(self.y_homs[0] - dyFunc)
 
             if(relNorm_sh < self.blockItTol
                and relNorm_f < self.blockItTol):
@@ -477,14 +709,17 @@ class CouDALFISh:
                     print("ERROR: Block iteration diverged.")
                 exit()
 
-        # Update Lagrange multiplier using most recent structure solution.
-        ydotFunc = Function(self.spline_sh.V)
-        ydotFunc.assign(self.ydot_alpha_hom)
-        nodeydot = self.contactContext_sh.evalFunction(ydotFunc)
-        self.updateNodalNormals()
-        noden = self.contactContext_sh.evalFunction(self.n_nodal_sh)
-        self.updateMultipliers(nodeydot, nodeu, noden)
+        ydotFuncs = [Function(spline.V) for spline in self.spline_shs]
+        for i in range(self.num_splines):
+            ydotFuncs[i].assign(self.ydot_alpha_homs[i])
+            nodeydots[i] = self.contactContext_sh.evalFunction(ydotFuncs[i],i)
 
-        # Move to the next time step.
+        self.updateNodalNormals()
+        for i in range(self.num_splines):
+            nodens[i] = self.contactContext_sh.\
+                        evalFunction(self.n_nodal_shs[i],i)
+        self.updateMultipliers(nodeydots, nodeus, nodens)
+
         self.timeInt_f.advance()
-        self.timeInt_sh.advance()
+        for i in range(self.num_splines):
+            self.timeInt_shs[i].advance()
