@@ -15,10 +15,24 @@ from ShNAPr.contact import *
 from mpi4py import MPI as pyMPI
 from numpy import zeros, save, load
 from tIGAr.timeIntegration import *
+from abc import ABC, abstractmethod
 
 # This module assumes 3D problems:
 d = 3
 ADD_MODE = PETSc.InsertMode.ADD
+
+# Log the individual shell residuals
+LOG_SHELL_RESIDUALS = True
+
+# Assume some tight absolute tolerances
+FLUID_ABS_TOL = 1e-11
+SHELL_ABS_TOL = 1e-8
+
+# Import logging functions for syntactic sugar
+from dolfin.cpp.log import LogLevel as LL
+from dolfin.cpp.log import log as log
+from dolfin.cpp.log import end as end
+from dolfin.cpp.log import begin as begin
 
 def stabScale(cutFunc,eps):
     """
@@ -29,6 +43,141 @@ def stabScale(cutFunc,eps):
     (e.g., from an immersed boundary).  
     """
     return conditional(gt(abs(cutFunc),0.0),eps,1.0)
+
+class MeshMotionProblem(ABC):
+    def meshMotionRestartName(self,restartPath,timeStep):
+        return restartPath+"/restart_m_"+str(timeStep)+".h5"
+    @abstractmethod
+    def writeRestarts(self,restartPath,timeStep):
+        pass
+    @abstractmethod
+    def readRestarts(self,restartPath,timeStep):
+        pass
+    @abstractmethod
+    def predict(self):
+        pass
+    @abstractmethod
+    def deform(self):
+        pass
+    @abstractmethod
+    def undeform(self):
+        pass
+    @abstractmethod
+    def compute_solution(self):
+        pass
+
+class NoMotion(MeshMotionProblem):
+    def writeRestarts(self, restartPath, timeStep):
+        super().writeRestarts(restartPath, timeStep)
+    def readRestarts(self, restartPath, timeStep):
+        super().readRestarts(restartPath, timeStep)
+    def predict(self):
+        super().predict()
+    def deform(self):
+        super().deform()
+    def undeform(self):
+        super().undeform()
+    def compute_solution(self):
+        super().compute_solution()
+
+class KnownMeshMotion(MeshMotionProblem):
+    def __init__(self,time_integrator):
+        self.time_integrator = time_integrator
+        self.V = self.time_integrator.x.function_space()
+        self.mesh = self.V.mesh()
+        self.deformation = Function(self.V)
+        self.reverse_deformation = Function(self.V)
+        self.deformed = False
+        super().__init__()
+
+    def writeRestarts(self, restartPath, timeStep):
+        f = HDF5File(worldcomm,
+                        self.meshMotionRestartName(restartPath,timeStep), "w")
+        f.write(self.time_integrator.x, "/uhat")
+        f.write(self.time_integrator.x_old, "/uhat_old")
+        f.write(self.time_integrator.xdot_old, "/uhatdot_old")
+        f.write(self.time_integrator.xddot_old, "/uhatdotdot_old")
+        f.close()
+
+    def readRestarts(self, restartPath, timeStep):
+        f = HDF5File(worldcomm,
+                        self.meshMotionRestartName(restartPath,timeStep), "r")
+        f.read(self.time_integrator.x, "/uhat")
+        f.read(self.time_integrator.x_old, "/uhat_old")
+        f.read(self.time_integrator.xdot_old, "/uhatdot_old")
+        f.read(self.time_integrator.xddot_old, "/uhatdotdot_old")
+        f.close()
+    
+    @abstractmethod
+    def predict(self,prediction):
+        self.time_integrator.x.assign(prediction)
+
+    def deform(self):
+        if self.deformed:
+            raise RuntimeError("Mesh problem is already deformed.")
+        self.deformation.assign(self.time_integrator.x_alpha())
+        self.reverse_deformation.assign(-self.deformation)
+        ALE.move(self.mesh,self.deformation)
+        self.deformed = True
+        self.mesh.bounding_box_tree().build(self.mesh)
+
+    def undeform(self):
+        if not self.deformed:
+            raise RuntimeError("Mesh problem is not yet deformed.")
+        ALE.move(self.mesh,self.reverse_deformation)
+        self.deformed = False
+        self.mesh.bounding_box_tree().build(self.mesh)
+
+    def compute_solution(self):
+        self.time_integrator.advance()
+
+class ExplicitMeshMotion(KnownMeshMotion):
+    def __init__(self,time_integrator,explicit_motion):
+        super().__init__(time_integrator)
+        self.explicit_motion = explicit_motion
+
+    def predict(self):
+        super().predict(project(self.explicit_motion,self.V,solver_type='gmres'))
+
+class SolvedMeshMotion(KnownMeshMotion):
+    DEFAULT_MESH_SOLVER_PARAMETERS = {'newton_solver':{
+        'linear_solver':'gmres',
+        'preconditioner':'jacobi',
+        'error_on_nonconvergence':False,
+        'maximum_iterations':100,
+        'relative_tolerance':1e-4,
+        'krylov_solver':{'error_on_nonconvergence':False,
+                         'relative_tolerance':1e-6,
+                         'maximum_iterations':200}}}
+
+    def __init__(self,time_integrator,res,
+                 bcs=[],Dres=None,u_s=None,bc_func=None):
+        super().__init__(time_integrator)
+        self.res = res
+        self.Dres = Dres
+        if self.Dres is None:
+            self.Dres = derivative(self.res,self.time_integrator.x)
+        self.bcs = bcs
+        self.u_s = u_s
+        self.bc_func = bc_func
+        
+    def predict(self):
+        super().predict(self.time_integrator.sameVelocityPredictor())
+
+    def compute_solution(self,
+            solver_parameters=DEFAULT_MESH_SOLVER_PARAMETERS):
+        if (self.bc_func is not None and self.u_s is not None):
+            self.bc_func.assign(project(self.u_s, self.V, 
+                                        solver_type='gmres',
+                                        preconditioner_type='jacobi'))
+        problem = NonlinearVariationalProblem(self.res, 
+                    self.time_integrator.x, 
+                    bcs=self.bcs, 
+                    J=self.Dres)
+        solver = NonlinearVariationalSolver(problem)
+        solver.parameters.update(solver_parameters)
+        solver.solve()
+        self.time_integrator.advance()
 
 class CouDALFISh:
     """
