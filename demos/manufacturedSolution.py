@@ -312,10 +312,11 @@ u_alpha = uPart(up_alpha)
 p = up[3]
 u_t_alpha = uPart(updot_alpha)
 cutFunc = Function(Vscalar)
-f_f,_ = strongResidual(u_exact(x_f),p_exact(x_f),mu,rho,u_t=u_t_exact(x_f))
+zero = Constant(d*(0,))
+f_f,_ = strongResidual(u_exact(x_f),p_exact(x_f),x_f,zero,mu,rho,u_t_exact(x_f),zero)
 f_f /= rho
 res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,
-                         u_t=u_t_alpha,Dt=Dt,dx=dx,f=f_f,
+                         v_t=u_t_alpha,Dt=Dt,dy=dx,f=f_f,
                          stabScale=stabScale(cutFunc,stabEps))
 
 # Flag vertical sides for weakBCs:
