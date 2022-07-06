@@ -70,7 +70,7 @@ parser.add_argument('--r',dest='results_folder',
                     help="Folder to write outputs to.")
 parser.add_argument('--log-ksp',dest='log_ksp',
                     default=False,action="store_true",
-                    help="Weather or not not log the fluid linear solver.")
+                    help="Weather or not to log the fluid linear solver.")
 parser.add_argument('--ksp_max_its',dest='ksp_max_its',type=int,
                     default=300,
                     help="Number of fluid linear solver iterations.")
@@ -174,7 +174,8 @@ for patch in range(0,2):
 for patch in range(0,2):
     for side in range(0,2):
         direction = 1
-        sideDofs = scalarSpline.getPatchSideDofs(patch,direction,side,nLayers=1)
+        sideDofs = scalarSpline.getPatchSideDofs(patch,direction,side,
+                                                 nLayers=1)
         field = 2
         splineGenerator.addZeroDofs(field,sideDofs)
                     
