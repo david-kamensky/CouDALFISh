@@ -331,7 +331,7 @@ scalar_space = spline.cpFuncs[0].function_space()
 scalar_element = scalar_space.ufl_element()
 vector_element = VectorElement(scalar_element,dim=d)
 shell_vis_space = FunctionSpace(scalar_space.mesh(),vector_element)
-prms = {'quadrature_degree':shell_vis_space.ufl_element().degree()}
+prms = {'quadrature_degree':2*shell_vis_space.ufl_element().degree()}
 
 # shell visualization
 parametricCoords3D = as_vector([spline.parametricCoordinates()[0],
@@ -341,9 +341,6 @@ relative_spatial_coords = spline.spatialCoordinates()-parametricCoords3D
 coordsRef = project(relative_spatial_coords,shell_vis_space,
                     form_compiler_parameters=prms)
 coordsRef.rename("coordsRef","coordsRef")
-outfile_sh_coordsRef = XDMFFile(selfcomm,RESULTS_FOLDER+"shell-coordsRef.xdmf")
-if (mpirank==0):
-    outfile_sh_coordsRef.write(coordsRef)
 
 # further shell visualization
 outfile_sh = XDMFFile(selfcomm,RESULTS_FOLDER+"shell-displacements.xdmf")
@@ -361,13 +358,17 @@ outfile_fsm.parameters["rewrite_function_mesh"] = False
 log(LL.INFO,"Fluid-Solid DOFs: "+str(V_f.dim()))
 log(LL.INFO,"Shell FEM DOFs: "+str(spline.M.size(0)))
 log(LL.INFO,"Shell IGA DOFs: "+str(spline.M.size(1)))
-log(LL.INFO,"Shell Lagrange nodes: "+str(spline.V_control.tabulate_dof_coordinates().shape[0]))
+log(LL.INFO,"Shell Lagrange nodes: "+str(spline.V_control
+                                                .tabulate_dof_coordinates()
+                                                .shape[0]))
 
 # Time stepping loop:
 t.assign(t+Dt)
 for timeStep in range(0,N_steps):
     
-    log(LL.INFO,"------- Time step "+str(timeStep+1)+"/"+str(N_steps)+" -------")
+    log(LL.INFO,"------- Time step "
+                 +str(timeStep+1)+"/"
+                 +str(N_steps)+" -------")
  
     # Output fields needed for visualization.
     if(timeStep % OUTPUT_SKIP == 0):
@@ -379,6 +380,7 @@ for timeStep in range(0,N_steps):
             d = project(y,shell_vis_space,form_compiler_parameters=prms)
             d.rename("d","d")
             outfile_sh.write(d,float(t))
+            outfile_sh.write(coordsRef,float(t))
 
         # Fluid--solid--mesh motion solution:
         (v, p) = up.split()
