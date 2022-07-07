@@ -303,16 +303,6 @@ res_f += alevms.weakDirichletBC(u_alpha,p,v,q,v_BC,rho,mu,mesh,
 bcs_f = [DirichletBC(V_f.sub(0).sub(d-1),Constant(0.0),
                      "x[2]<0.0 || x[2]>"+str(D)),]
 
-# GMRES fluid solver:
-fluidLinearSolver = PETScKrylovSolver("gmres","jacobi")
-fluidLinearSolver.ksp().setGMRESRestart(KSP_MAX_ITS)
-fluidLinearSolver.parameters['maximum_iterations'] = KSP_MAX_ITS
-fluidLinearSolver.parameters['error_on_nonconvergence'] = False
-fluidLinearSolver.parameters['monitor_convergence'] = LOG_KSP
-fluidLinearSolver.parameters['report'] = LOG_KSP
-fluidLinearSolver.parameters['relative_tolerance'] = KSP_REL_TOL
-fluidLinearSolver.set_norm_type(PETScKrylovSolver.norm_type.unpreconditioned)
-
 # Coupling with CouDALFISh:
 fsiProblem = aledal.CouDALFISh(mesh,res_f,timeInt_f,
                                spline,res_sh,timeInt_sh,
@@ -321,7 +311,6 @@ fsiProblem = aledal.CouDALFISh(mesh,res_f,timeInt_f,
                                blockItTol=blockItTol,
                                cutFunc=cutFunc,
                                meshProblem=meshProblem,
-                               fluidLinearSolver=fluidLinearSolver,
                                Dres_sh=derivative(res_sh,y_hom),
                                r=0.0)
 
