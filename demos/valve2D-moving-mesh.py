@@ -68,15 +68,9 @@ parser.add_argument('--outputFileName',dest='outputFileName',
 parser.add_argument('--r',dest='results_folder',
                     default="./results/",
                     help="Folder to write outputs to.")
-parser.add_argument('--log-ksp',dest='log_ksp',
+parser.add_argument('--log-timings',dest='log_timings',
                     default=False,action="store_true",
-                    help="Weather or not to log the fluid linear solver.")
-parser.add_argument('--ksp_max_its',dest='ksp_max_its',type=int,
-                    default=300,
-                    help="Number of fluid linear solver iterations.")
-parser.add_argument('--ksp_rel_tol',dest='ksp_rel_tol',type=float,
-                    default=1e-3,
-                    help="Relative tolerance of the fluid linear solver.")
+                    help="Weather or not to log the timings.")
 args = parser.parse_args()
 
 # For FSI, fluids, and shells:
@@ -122,9 +116,7 @@ N_steps_over_Nel = int(args.N_steps_over_Nel)
 rho_infty = Constant(float(args.rho_infty))
 RESULTS_FOLDER = str(args.results_folder)
 outputFileName = RESULTS_FOLDER + str(args.outputFileName)
-LOG_KSP = bool(args.log_ksp)
-KSP_MAX_ITS = int(args.ksp_max_its)
-KSP_REL_TOL = float(args.ksp_rel_tol)
+LOG_TIMINGS = bool(args.log_timings)
 
 
 # Fixed parameters of the benchmark problem:
@@ -413,4 +405,5 @@ for timeStep in range(0,N_steps):
     t.assign(t+Dt)
 
     # print timings
-    list_timings(TimingClear.clear,[TimingType.wall])
+    if LOG_TIMINGS:
+        list_timings(TimingClear.clear,[TimingType.wall])
