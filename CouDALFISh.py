@@ -323,32 +323,28 @@ class SolvedMeshMotion(KnownMeshMotion):
     Concrete MeshMotion class for when the mesh motion is defined by the
     solution to a variational problem.
     '''
-    DEFAULT_MESH_SOLVER_PARAMETERS = {'newton_solver':{
-        'linear_solver':'gmres',
-        'preconditioner':'jacobi',
-        'error_on_nonconvergence':False,
-        'maximum_iterations':100,
-        'relative_tolerance':1e-4,
-        'krylov_solver':{'error_on_nonconvergence':False,
-                         'relative_tolerance':1e-6,
-                         'maximum_iterations':200}}}
 
     def __init__(self,time_integrator,res,
                  bcs=[],Dres=None,u_s=None,bc_func=None,
                  logger=ConsoleLogger(),
-                 solver_parameters=DEFAULT_MESH_SOLVER_PARAMETERS):
+                 linearSolver=PETScLUSolver("mumps"),
+                 maxIters=20,
+                 noError=False,
+                 relTol=1e-4):
         '''
         Constructor taking in a ``tIGAr`` GeneralizedAlpha ``time_integrator``,
         the mesh residual form, ``res``, the boundary conditions on the
         problem, ``bcs``, and the tangent residual, `Dres`.
 
-        The nonlinear ``solver_parameters`` can be configured via the same
-        interface as ``NonlinearVariationalSolver``.
-
         Since the boundary conditions often need to depend on another
         FunctionSpace (ie from a coupled fluid-solid solution), ``u_s`` is
         projected into the mesh motion FunctionSpace and assigned to
         ``bc_func`` before solution or boundary condition enforcement occurs.
+
+        The ``linearSolver`` is used in a Newton iteration with a relative
+        tolerance convergence criteria of ``relTol``. The variable ``noError``
+        describes the behavior (error vs warning) when the `maxIters`` are
+        reached.
         '''
         super().__init__(time_integrator)
         self.res = res
@@ -358,7 +354,11 @@ class SolvedMeshMotion(KnownMeshMotion):
         self.bcs = bcs
         self.u_s = u_s
         self.bc_func = bc_func
-        self.solver_parameters = solver_parameters
+        self.logger = logger
+        self.linearSolver = linearSolver
+        self.maxIters = maxIters
+        self.noError = noError
+        self.relTol = relTol
         
     def predict(self):
         '''
@@ -370,18 +370,71 @@ class SolvedMeshMotion(KnownMeshMotion):
         '''
         Compute the (n+1)-level solution to the mesh motion problem.
         '''
+        # project the boundary condition function from another function space
+        # into the mesh motion function space
         if (self.bc_func is not None and self.u_s is not None):
             self.bc_func.assign(project(self.u_s, self.V, 
                                         solver_type='gmres',
                                         preconditioner_type='jacobi'))
-        problem = NonlinearVariationalProblem(self.res, 
-                    self.time_integrator.x, 
-                    bcs=self.bcs, 
-                    J=self.Dres)
-        solver = NonlinearVariationalSolver(problem)
-        solver.parameters.update(self.solver_parameters)
-        solver.solve()
+        # start the Newton iteration
+        self.logger.begin("Mesh problem Newton iteration:")
+        resNorm0 = -1.0
+        for i in range(self.maxIters+1):
+
+            # enforce the strong BCs on the solution directly
+            for bc in self.bcs:
+                bc.apply(self.time_integrator.x.vector())
+            
+            # assemble the tangent and residual forms
+            K = assemble(self.Dres)
+            F = assemble(self.res)
+
+            # allocate an increment
+            dx = Function(self.V)
+
+            # enforce homogenous boundary conditions on the increment problem
+            for bc in self.bcs:
+                bc = DirichletBC(bc)
+                bc.homogenize()
+                bc.apply(K,F,dx.vector())
+            
+            # find the norm of the assembled residual
+            resNorm = norm(F)
+
+            # save if the first norm
+            if(resNorm0 < 0.0 and resNorm > DOLFIN_EPS):
+                resNorm0 = resNorm
+            
+            # compute relative norm or ignore iteration
+            if(resNorm0 > 0.0):
+                resNormRel = resNorm/resNorm0
+            else:
+                resNormRel = 0.0
+            
+            # log relative residual
+            self.logger.log((f"It {i:02d} residual "
+                             f"(relative): {resNormRel:0.4e}"))
+            
+            # exit Newton iteration on convergence
+            if resNormRel<self.relTol:
+                break
+
+            # exit Newton iteration on nonconvergence with warning or error
+            if (i == self.maxIters or resNorm==np.nan):
+                if self.noError:
+                    self.logger.warning(("Iteration terminated "
+                                         "without convergence."))
+                    break
+                else:
+                    self.logger.error("Mesh Newton iteration diverged.")
+            
+            # solve for the mesh increment and subtract it from the solution
+            self.linearSolver.solve(K,dx.vector(),F)
+            self.time_integrator.x.assign(self.time_integrator.x - dx)
+        
+        # update the time integrator with the new solution
         self.time_integrator.advance()
+        self.logger.end()
 
 class CouDALFISh:
     """
