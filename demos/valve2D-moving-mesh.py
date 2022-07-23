@@ -86,11 +86,11 @@ from tIGAr.timeIntegration import *
 set_log_active(False)
 if (mpirank==0):
     set_log_active(True)
+logger = aledal.ConsoleLogger()
+
+# set compiler to TSFC
 parameters['form_compiler']['representation'] = 'tsfc'
 sys.setrecursionlimit(10000)
-
-from dolfin.cpp.log import LogLevel as LL
-from dolfin.cpp.log import log as log
 
 # Check whether the user downloaded and extracted the data files to the
 # working directory; assume that if one is present all are, since including
@@ -100,7 +100,7 @@ fnameSuffix = ".dat"
 fnameCheck = fnamePrefix+"1"+fnameSuffix
 import os.path
 if(not os.path.isfile(fnameCheck)):
-    error("Missing data files for shell structure geometry. "
+    logger.error("Missing data files for shell structure geometry. "
             +"Please refer to the docstring at the top of this script.")
 
 Nel_f_vert = int(args.Nel_f_vert)
@@ -142,7 +142,7 @@ penalty = C_pen*float(mu)/h_f # DAL penalty
 
 ####### Read in structure mesh and generate extracted spline #######
 
-log(LL.INFO,"Generating extraction data...")
+logger.log("Generating extraction data...")
     
 # Load a control mesh from several files in a legacy ASCII format; must use
 # triangles for evaluation of tip displacement.
@@ -171,7 +171,7 @@ for patch in range(0,2):
         field = 2
         splineGenerator.addZeroDofs(field,sideDofs)
                     
-log(LL.INFO,"Creating extracted spline...")
+logger.log("Creating extracted spline...")
 
 # Quadrature degree for the analysis:
 QUAD_DEG = 4
@@ -303,6 +303,7 @@ fsiProblem = aledal.CouDALFISh(mesh,res_f,timeInt_f,
                                blockItTol=blockItTol,
                                cutFunc=cutFunc,
                                meshProblem=meshProblem,
+                               logger=logger,
                                Dres_sh=derivative(res_sh,y_hom),
                                r=0.0)
 
@@ -337,10 +338,10 @@ outfile_fsm.parameters["functions_share_mesh"] = True
 outfile_fsm.parameters["rewrite_function_mesh"] = False
 
 # report size of problem
-log(LL.INFO,"Fluid-Solid DOFs: "+str(V_f.dim()))
-log(LL.INFO,"Shell FEM DOFs: "+str(spline.M.size(0)))
-log(LL.INFO,"Shell IGA DOFs: "+str(spline.M.size(1)))
-log(LL.INFO,"Shell Lagrange nodes: "+str(spline.V_control
+logger.log("Fluid-Solid DOFs: "+str(V_f.dim()))
+logger.log("Shell FEM DOFs: "+str(spline.M.size(0)))
+logger.log("Shell IGA DOFs: "+str(spline.M.size(1)))
+logger.log("Shell Lagrange nodes: "+str(spline.V_control
                                                 .tabulate_dof_coordinates()
                                                 .shape[0]))
 
@@ -348,7 +349,7 @@ log(LL.INFO,"Shell Lagrange nodes: "+str(spline.V_control
 t.assign(t+Dt)
 for timeStep in range(0,N_steps):
     
-    log(LL.INFO,"------- Time step "
+    logger.log("------- Time step "
                  +str(timeStep+1)+"/"
                  +str(N_steps)+" -------")
  
@@ -406,4 +407,4 @@ for timeStep in range(0,N_steps):
 
     # print timings
     if LOG_TIMINGS:
-        list_timings(TimingClear.clear,[TimingType.wall])
+        logger.log(timings(TimingClear.clear,[TimingType.wall]).str(True))

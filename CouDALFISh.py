@@ -16,6 +16,7 @@ from mpi4py import MPI as pyMPI
 from numpy import zeros, save, load
 from tIGAr.timeIntegration import *
 from abc import ABC, abstractmethod
+import os
 
 # This module assumes 3D problems:
 d = 3
@@ -26,10 +27,102 @@ LOG_SHELL_RESIDUALS = True
 
 # Import logging functions for syntactic sugar
 from dolfin.cpp.log import LogLevel
-LVL = LogLevel.INFO
 from dolfin.cpp.log import log as log
 from dolfin.cpp.log import end as end
 from dolfin.cpp.log import begin as begin
+
+class Logger(ABC):
+    def __init__(self) -> None:
+        self.indents = 0
+        super().__init__()
+
+    @abstractmethod
+    def log(self,msg:str) -> None:
+        pass
+
+    def begin(self,msg:str) -> None:
+        self.log(msg)
+        self.indents += 1
+
+    def end(self) -> None:
+        self.indents -= 1
+        if self.indents < 0:
+            self.indents = 0
+    
+    def warning(self,msg:str) -> None:
+        self.log("**** Warning: " + msg + "****")
+
+    def error(self,msg:str) -> None:
+        self.log(60*"*")
+        self.log("**** ERROR: " + msg)
+        self.log(60*"*")
+        raise RuntimeError(msg)
+
+class DolfinLogger(Logger):
+    def __init__(self,level=LogLevel.INFO) -> None:
+        self.level = level
+        super().__init__()
+    def log(self, msg: str) -> None:
+        log(self.level, self.indents*"  " + msg)
+
+class ConsoleLogger(Logger):
+    def __init__(self,comm=MPI.comm_world) -> None:
+        self.comm = comm
+        self.rank = self.comm.Get_rank()
+        super().__init__()
+
+    def log(self, msg: str) -> None:
+        if self.rank==0:
+            print(self.indents*"  " + msg)
+        self.comm.barrier()
+    
+class FileLogger(Logger):
+    def __init__(self,comm=MPI.comm_world,file="./log.txt") -> None:
+        self.comm = comm
+        self.rank = self.comm.Get_rank()
+        self.file = file
+        if os.path.exists(self.file):
+            os.remove(self.file)
+        super().__init__()
+
+    def log(self, msg: str) -> None:
+        if self.rank==0:
+            with open(self.file,"a") as f:
+                f.write(self.indents*"  " + msg + "\n")
+        self.comm.barrier()
+
+class MultiLogger(Logger):
+    def __init__(self, loggers=[ConsoleLogger(),FileLogger()]) -> None:
+        self.loggers = loggers
+        super().__init__()
+
+    def log(self, msg: str) -> None:
+        for logger in self.loggers:
+            logger.log(msg)
+
+    def begin(self,msg:str) -> None:
+        for logger in self.loggers:
+            logger.log(msg)
+            logger.indents += 1
+
+    def end(self) -> None:
+        for logger in self.loggers:
+            logger.indents -= 1
+            if logger.indents < 0:
+                logger.indents = 0
+    
+    def warning(self,msg:str) -> None:
+        for logger in self.loggers:
+            logger.log("**** Warning: " + msg + "****")
+
+    def error(self,msg:str) -> None:
+        for logger in self.loggers:
+            try:
+                logger.error(msg)
+            except RuntimeError as e:
+                pass
+        raise RuntimeError(msg)
+        
 
 def stabScale(cutFunc,eps):
     """
@@ -208,6 +301,7 @@ class SolvedMeshMotion(KnownMeshMotion):
 
     def __init__(self,time_integrator,res,
                  bcs=[],Dres=None,u_s=None,bc_func=None,
+                 logger=ConsoleLogger(),
                  solver_parameters=DEFAULT_MESH_SOLVER_PARAMETERS):
         '''
         Constructor taking in a ``tIGAr`` GeneralizedAlpha ``time_integrator``,
@@ -268,6 +362,7 @@ class CouDALFISh:
                  Dres_f=None, Dres_sh=None, meshProblem=NoMotion(),
                  contactContext_sh=None, nonmatching_sh=None,
                  fluidLinearSolver=PETScLUSolver("mumps"),
+                 logger=ConsoleLogger(),
                  cutFunc=None):
         """
         ``mesh_f`` is the fluid finite element mesh.  ``res_f`` is the residual
@@ -309,6 +404,9 @@ class CouDALFISh:
         in the residual ``res_f``, to scale SUPG/PSPG/LSIC stabilization
         parameters.
         """
+
+        # add logger
+        self.logger = logger
 
         # Fluid related attributes
         self.mesh_f = mesh_f
@@ -628,7 +726,7 @@ class CouDALFISh:
                 coupling_res_iga = self.spline_shs[i].extractVector(
                                                 coupling_res_func.vector())
                 abs_res = norm(coupling_res_iga)
-                log(LVL,(f"Shell {i} coupling residual (absolute): "
+                self.logger.log((f"Shell {i} coupling residual (absolute): "
                              f"{abs_res:0.4e}"))
             Ams[i][i].setDiagonal(lmVec, addv=ADD_MODE)
         
@@ -773,7 +871,7 @@ class CouDALFISh:
         Fnorm_f0 = -1.0
         for blockIt in range(0,self.blockIts+1):
 
-            begin(LVL,f"Block iteration {blockIt:02d}:")
+            self.logger.begin(f"Block iteration {blockIt:02d}:")
 
             # Assemble the fluid subproblem
             # Enforce boundary conditions
@@ -848,7 +946,7 @@ class CouDALFISh:
                     if LOG_SHELL_RESIDUALS:
                         material_res_iga = norm(self.spline_shs[i]\
                                         .extractVector(PETScVector(Fs_FE[i])))
-                        log(LVL,(f"Shell {i} material residual "
+                        self.logger.log((f"Shell {i} material residual "
                                      f"(absolute): {material_res_iga:0.4e}"))
 
             # Next, add on the contact contributions, assembled using the
@@ -868,8 +966,8 @@ class CouDALFISh:
                                 contact_res_iga = norm(self.spline_shs[i]
                                                        .extractVector(\
                                                         PETScVector(Fcs_FE)))
-                                log(LVL,(f"Shell {i} contact  residual "
-                                    f"(absolute): {contact_res_iga:0.4e}"))
+                                self.logger.log((f"Shell {i} contact  residual"
+                                    f" (absolute): {contact_res_iga:0.4e}"))
                         for j in range(self.num_splines):
                             if Ks_FE[i][j] is None:
                                 Ks_FE[i][j] = Kcs_FE[i][j]
@@ -884,11 +982,11 @@ class CouDALFISh:
                             contact_res_iga = norm(self.spline_shs[0]
                                                     .extractVector(\
                                                     PETScVector(Fcs_FE)))
-                            log(LVL,(f"Shell {0} contact  residual "
+                            self.logger.log((f"Shell {0} contact  residual "
                                     f"(absolute): {contact_res_iga:0.4e}"))
                     else:
                         if LOG_SHELL_RESIDUALS:
-                            log(LVL,(f"Shell {0} contact  residual "
+                            self.logger.log((f"Shell {0} contact  residual "
                                     f"(absolute): {0:0.4e}"))
 
             # Add the structure's FSI coupling forces
@@ -965,10 +1063,10 @@ class CouDALFISh:
                 relNorm_sh = 0.0
 
             # report the nonlinear residuals
-            log(LVL,f"Shell residual (absolute): {Fnorm_sh:0.4e}")
-            log(LVL,f"Fluid residual (absolute): {Fnorm_f:0.4e}")
-            log(LVL,f"Shell residual (relative): {relNorm_sh:0.4e}")
-            log(LVL,f"Fluid residual (relative): {relNorm_sh:0.4e}")
+            self.logger.log(f"Shell residual (absolute): {Fnorm_sh:0.4e}")
+            self.logger.log(f"Fluid residual (absolute): {Fnorm_f:0.4e}")
+            self.logger.log(f"Shell residual (relative): {relNorm_sh:0.4e}")
+            self.logger.log(f"Fluid residual (relative): {relNorm_sh:0.4e}")
 
             # Solve for the nonlinear increment, and add it to the current
             # solution guess.  (Applies BCs)
@@ -1025,19 +1123,20 @@ class CouDALFISh:
 
             # exit block iterations on convergence or non-convergence
             if(relNorm_sh<self.blockItTol and relNorm_f<self.blockItTol):
-                end()
+                self.logger.end()
                 break
             if (blockIt == self.blockIts or \
                 Fnorm_f==np.nan or \
                 Fnorm_sh==np.nan):
                 if self.blockNoErr:
-                    warning("Block iteration terminated without convergence.")
-                    end()
+                    self.logger.warning(("Block iteration terminated "
+                                         "without convergence."))
+                    self.logger.end()
                     break
                 else:
-                    end()
-                    error("Block iteration diverged.")
-            end()
+                    self.logger.end()
+                    self.logger.error("Block iteration diverged.")
+            self.logger.end()
 
 
         # solve mesh problem with converged fluid-solid and shell
@@ -1046,10 +1145,12 @@ class CouDALFISh:
         if self.write_shell_residual:
             # save shell residual to a file
             shell_residaul_func = Function(self.spline_shs[0].V)
-            self.spline_shs[0].M.mat().mult(MTF_sh, shell_residaul_func.vector().vec())
+            self.spline_shs[0].M.mat().mult(MTF_sh, shell_residaul_func.\
+                                                    vector().vec())
             shell_residaul_func.rename("res_sh","res_sh")
             if mpirank==0:
-                self.shell_residual_file.write(shell_residaul_func,self.timeInt_f.t)
+                self.shell_residual_file.write(shell_residaul_func,
+                                               self.timeInt_f.t)
 
         # update shell velocities
         ydotFuncs = [Function(spline.V) for spline in self.spline_shs]
