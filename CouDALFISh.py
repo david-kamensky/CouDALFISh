@@ -32,33 +32,58 @@ from dolfin.cpp.log import end as end
 from dolfin.cpp.log import begin as begin
 
 class Logger(ABC):
+    '''
+    Interface for a logging object, implementers must decide where (file,
+    stout, etc) the logging is directed to.
+    '''
     def __init__(self) -> None:
         self.indents = 0
         super().__init__()
 
     @abstractmethod
     def log(self,msg:str) -> None:
+        '''
+        Add a message ``msg`` to the log.
+        '''
         pass
 
     def begin(self,msg:str) -> None:
+        '''
+        Begin a new section of code with some title ``msg`` by indenting each
+        new log line by two additional spaces.
+        '''
         self.log(msg)
         self.indents += 1
 
     def end(self) -> None:
+        '''
+        End the current section of the log by removing a level of two-space
+        indent. Will not remove to less than 0 indents.
+        '''
         self.indents -= 1
         if self.indents < 0:
             self.indents = 0
     
     def warning(self,msg:str) -> None:
+        '''
+        Issue a warning in the log with special formatting but do not throw an
+        error.
+        '''
         self.log("**** Warning: " + msg + "****")
 
     def error(self,msg:str) -> None:
+        '''
+        Issue an error statement about ``msg`` than throw a ``RuntimeError``.
+        '''
         self.log(60*"*")
         self.log("**** ERROR: " + msg)
         self.log(60*"*")
         raise RuntimeError(msg)
 
 class DolfinLogger(Logger):
+    '''
+    A Logger that uses the built-in ``dolfin.cpp.log`` module.
+    '''
     def __init__(self,level=LogLevel.INFO) -> None:
         self.level = level
         super().__init__()
@@ -66,6 +91,9 @@ class DolfinLogger(Logger):
         log(self.level, self.indents*"  " + msg)
 
 class ConsoleLogger(Logger):
+    '''
+    A Logger that uses print() on only the first MPI rank for logging.
+    '''
     def __init__(self,comm=MPI.comm_world) -> None:
         self.comm = comm
         self.rank = self.comm.Get_rank()
@@ -77,6 +105,9 @@ class ConsoleLogger(Logger):
         self.comm.barrier()
     
 class FileLogger(Logger):
+    '''
+    A Logger that writes the log to a file on only the master MPI node.
+    '''
     def __init__(self,comm=MPI.comm_world,file="./log.txt") -> None:
         self.comm = comm
         self.rank = self.comm.Get_rank()
@@ -92,6 +123,9 @@ class FileLogger(Logger):
         self.comm.barrier()
 
 class MultiLogger(Logger):
+    '''
+    A Logger that writes to multiple sources.
+    '''
     def __init__(self, loggers=[ConsoleLogger(),FileLogger()]) -> None:
         self.loggers = loggers
         super().__init__()
