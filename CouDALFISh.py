@@ -316,7 +316,8 @@ class ExplicitMeshMotion(KnownMeshMotion):
         Assign the exact solution to the (n+1)-level mesh motion (similar to a
         prediction where the exact solution is known.)
         '''
-        super().predict(project(self.explicit_motion,self.V,solver_type='gmres'))
+        super().predict(project(self.explicit_motion,self.V,
+                                solver_type='gmres'))
 
 class SolvedMeshMotion(KnownMeshMotion):
     '''
@@ -924,6 +925,9 @@ class CouDALFISh:
         """
         Advance the ``CouDALFISh`` by one time step.
         """
+        T_full = Timer("CFSH 00: full takeStep()")
+        T_full.start()
+
         if not self.multiPatch:
             # For single extracted spline case, if the initial condition 
             # (0 s) for Lagrange multiplier ``self.lam`` is changed, change 
@@ -960,17 +964,18 @@ class CouDALFISh:
 
             self.logger.begin(f"Block iteration {blockIt:02d}:")
 
-            # Assemble the fluid subproblem
-            # Enforce boundary conditions
-            for bc in self.bcs_f:
-                bc.apply(self.up.vector())
-            K_f = assemble(self.Dres_f)
-            F_f = assemble(self.res_f)
-            dup = Function(self.V_f)
-            for bc in self.bcs_f:
-                bc = DirichletBC(bc)
-                bc.homogenize()
-                bc.apply(K_f,F_f,dup.vector())
+            with Timer("CFSH 01: assemble fluid material"):
+                # Assemble the fluid subproblem
+                # Enforce boundary conditions
+                for bc in self.bcs_f:
+                    bc.apply(self.up.vector())
+                K_f = assemble(self.Dres_f)
+                F_f = assemble(self.res_f)
+                dup = Function(self.V_f)
+                for bc in self.bcs_f:
+                    bc = DirichletBC(bc)
+                    bc.homogenize()
+                    bc.apply(K_f,F_f,dup.vector())
 
             # Move background mesh to alpha level configuration
             self.meshProblem.deform()
@@ -979,24 +984,25 @@ class CouDALFISh:
             self.updateStabScale(nodexs,noderanks)
 
             # Add fluid's FSI coupling terms
-            upFunc = Function(self.V_f)
-            upFunc.assign(self.up_alpha)
-            nodeus = self.evalFluidVelocities(upFunc,nodexs,noderanks)
+            with Timer("CFSH 02: assemble fluid coupling"):
+                upFunc = Function(self.V_f)
+                upFunc.assign(self.up_alpha)
+                nodeus = self.evalFluidVelocities(upFunc,nodexs,noderanks)
 
-            ydotFuncs = []
-            nodeydots = []
-            for i in range(self.num_splines):
-                ydotFuncs += [Function(self.spline_shs[i].V),]
-                ydotFuncs[i].assign(self.ydot_alpha_homs[i])
-                nodeydots += [self.contactContext_sh
-                              .evalFunction(ydotFuncs[i],i)]
-            self.updateNodalNormals()
-            nodens = []
-            for i in range(self.num_splines):
-                nodens += [self.contactContext_sh
-                           .evalFunction(self.n_nodal_shs[i],i)]
-            self.addFluidCouplingForces(nodeydots, nodeus, nodexs, 
-                                        noderanks, nodens, K_f, F_f)
+                ydotFuncs = []
+                nodeydots = []
+                for i in range(self.num_splines):
+                    ydotFuncs += [Function(self.spline_shs[i].V),]
+                    ydotFuncs[i].assign(self.ydot_alpha_homs[i])
+                    nodeydots += [self.contactContext_sh
+                                .evalFunction(ydotFuncs[i],i)]
+                self.updateNodalNormals()
+                nodens = []
+                for i in range(self.num_splines):
+                    nodens += [self.contactContext_sh
+                            .evalFunction(self.n_nodal_shs[i],i)]
+                self.addFluidCouplingForces(nodeydots, nodeus, nodexs, 
+                                            noderanks, nodens, K_f, F_f)
             
             # assemble current configuration volumetric flowrate
             if self.includeFlowrate:
@@ -1014,74 +1020,83 @@ class CouDALFISh:
             # OK that this is in current config because the system has 
             # already been assembled
             # Avoids annoying warnings about non-convergence:
-            self.fluidLinearSolver.solve(K_f,dup.vector(),F_f)
+            with Timer("CFSH 04: solve fluid"):
+                self.fluidLinearSolver.solve(K_f,dup.vector(),F_f)
             self.up.assign(self.up - dup)
 
             # Assemble the structure subproblem
-            if self.nonmatching_sh is not None:
-                Ks_FE, Fs_FE = self.nonmatching_sh.assemble_nonmatching()
+            with Timer("CFSH 05: assemble shell material"):
+                if self.nonmatching_sh is not None:
+                    Ks_FE, Fs_FE = self.nonmatching_sh.assemble_nonmatching()
 
-            else:
-                Fs_FE = [None for i in range(self.num_splines)]
-                Ks_FE = [[None for i in range(self.num_splines)]
-                         for j in range(self.num_splines)]
-                for i in range(self.num_splines):
-                    Fs_FE[i] = as_backend_type(assemble(self.res_shs[i]))\
-                               .vec()
-                    Ks_FE[i][i] = as_backend_type(assemble(self.Dres_shs[i]))\
-                                  .mat()
-                    if LOG_SHELL_RESIDUALS:
-                        material_res_iga = norm(self.spline_shs[i]\
-                                        .extractVector(PETScVector(Fs_FE[i])))
-                        self.logger.log((f"Shell {i} material residual "
-                                     f"(absolute): {material_res_iga:0.4e}"))
+                else:
+                    Fs_FE = [None for i in range(self.num_splines)]
+                    Ks_FE = [[None for i in range(self.num_splines)]
+                            for j in range(self.num_splines)]
+                    for i in range(self.num_splines):
+                        Fs_FE[i] = as_backend_type(assemble(self.res_shs[i]))\
+                                .vec()
+                        Ks_FE[i][i] = as_backend_type(assemble(
+                                    self.Dres_shs[i])).mat()
+                        if LOG_SHELL_RESIDUALS:
+                            material_res_iga = norm(self.spline_shs[i]\
+                                            .extractVector(PETScVector(
+                                            Fs_FE[i])))
+                            self.logger.log((f"Shell {i} material residual "
+                                        f"(absolute): "
+                                        f"{material_res_iga:0.4e}"))
 
             # Next, add on the contact contributions, assembled using the
             # function defined above.
-            if self.includeContact_sh is True:
-                yFuncs = []
-                for i in range(self.num_splines):
-                    yFuncs += [Function(self.spline_shs[i].V),]
-                    yFuncs[i].assign(self.y_alpha_homs[i])
-                Kcs_FE, Fcs_FE = self.contactContext_sh\
-                                 .assembleContact(yFuncs, output_PETSc=True)
-                if self.multiPatch:
+            with Timer("CFSH 06: assemble shell contact"):
+                if self.includeContact_sh is True:
+                    yFuncs = []
                     for i in range(self.num_splines):
-                        if Fcs_FE[i] is not None:
-                            Fs_FE[i] += Fcs_FE[i]
-                            if LOG_SHELL_RESIDUALS:
-                                contact_res_iga = norm(self.spline_shs[i]
-                                                       .extractVector(\
+                        yFuncs += [Function(self.spline_shs[i].V),]
+                        yFuncs[i].assign(self.y_alpha_homs[i])
+                    Kcs_FE, Fcs_FE = self.contactContext_sh\
+                                    .assembleContact(yFuncs, output_PETSc=True)
+                    if self.multiPatch:
+                        for i in range(self.num_splines):
+                            if Fcs_FE[i] is not None:
+                                Fs_FE[i] += Fcs_FE[i]
+                                if LOG_SHELL_RESIDUALS:
+                                    contact_res_iga = norm(self.spline_shs[i]
+                                                        .extractVector(
                                                         PETScVector(Fcs_FE)))
-                                self.logger.log((f"Shell {i} contact  residual"
-                                    f" (absolute): {contact_res_iga:0.4e}"))
-                        for j in range(self.num_splines):
-                            if Ks_FE[i][j] is None:
-                                Ks_FE[i][j] = Kcs_FE[i][j]
-                            elif Ks_FE[i][j] is not None and \
-                                Kcs_FE[i][j] is not None:
-                                Ks_FE[i][j] += Kcs_FE[i][j]
-                else:
-                    if Fcs_FE is not None:
-                        Fs_FE[0] += Fcs_FE
-                        Ks_FE[0][0] += Kcs_FE
-                        if LOG_SHELL_RESIDUALS:
-                            contact_res_iga = norm(self.spline_shs[0]
-                                                    .extractVector(\
-                                                    PETScVector(Fcs_FE)))
-                            self.logger.log((f"Shell {0} contact  residual "
-                                    f"(absolute): {contact_res_iga:0.4e}"))
+                                    self.logger.log((f"Shell {i} contact  "
+                                        f"residual (absolute): "
+                                        f"{contact_res_iga:0.4e}"))
+                            for j in range(self.num_splines):
+                                if Ks_FE[i][j] is None:
+                                    Ks_FE[i][j] = Kcs_FE[i][j]
+                                elif Ks_FE[i][j] is not None and \
+                                    Kcs_FE[i][j] is not None:
+                                    Ks_FE[i][j] += Kcs_FE[i][j]
                     else:
-                        if LOG_SHELL_RESIDUALS:
-                            self.logger.log((f"Shell {0} contact  residual "
-                                    f"(absolute): {0:0.4e}"))
+                        if Fcs_FE is not None:
+                            Fs_FE[0] += Fcs_FE
+                            Ks_FE[0][0] += Kcs_FE
+                            if LOG_SHELL_RESIDUALS:
+                                contact_res_iga = norm(self.spline_shs[0]
+                                                        .extractVector(
+                                                        PETScVector(Fcs_FE)))
+                                self.logger.log((f"Shell {0} contact  "
+                                        f"residual (absolute): "
+                                        f"{contact_res_iga:0.4e}"))
+                        else:
+                            if LOG_SHELL_RESIDUALS:
+                                self.logger.log((
+                                        f"Shell {0} contact  residual "
+                                        f"(absolute): {0:0.4e}"))
 
             # Add the structure's FSI coupling forces
-            upFunc = Function(self.V_f)
-            upFunc.assign(self.up_alpha)
-            nodeus = self.evalFluidVelocities(upFunc, nodexs, noderanks)
-            self.addShellCouplingForces(nodeydots, nodeus, nodens, 
-                                        noderanks, Ks_FE, Fs_FE)
+            with Timer("CFSH 07: assemble shell coupling"):
+                upFunc = Function(self.V_f)
+                upFunc.assign(self.up_alpha)
+                nodeus = self.evalFluidVelocities(upFunc, nodexs, noderanks)
+                self.addShellCouplingForces(nodeydots, nodeus, nodens, 
+                                            noderanks, Ks_FE, Fs_FE)
 
             # Move background mesh back to reference configuration
             self.meshProblem.undeform()
@@ -1180,8 +1195,10 @@ class CouDALFISh:
                              comm=self.spline_shs[0].comm)
                 dy.setUp()
                 dy.assemble()
-
-            solve(PETScMatrix(MTKM_sh), PETScVector(dy), PETScVector(MTF_sh))
+            with Timer("CFSH 08: solve shell"):
+                solve(PETScMatrix(MTKM_sh), 
+                      PETScVector(dy), 
+                      PETScVector(MTF_sh))
 
             if self.multiPatch:
                 for i in range(self.num_splines):
@@ -1227,7 +1244,8 @@ class CouDALFISh:
 
 
         # solve mesh problem with converged fluid-solid and shell
-        self.meshProblem.compute_solution()
+        with Timer("CFSH 09: advance mesh problem"):
+            self.meshProblem.compute_solution()
 
         if self.write_shell_residual:
             # save shell residual to a file
@@ -1258,3 +1276,5 @@ class CouDALFISh:
         self.timeInt_f.advance()
         for i in range(self.num_splines):
             self.timeInt_shs[i].advance()
+
+        T_full.stop()
