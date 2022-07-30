@@ -74,8 +74,8 @@ parser.add_argument('--log-timings',dest='log_timings',
 args = parser.parse_args()
 
 # For FSI, fluids, and shells:
-import CouDALFISh as aledal
-import VarMINT as alevms
+import CouDALFISh as cfsh
+import VarMINT as vrmt
 from ShNAPr.SVK import *
 
 # For spline setup:
@@ -83,10 +83,10 @@ from tIGAr.BSplines import *
 from tIGAr.timeIntegration import *
 
 # Suppress excessive output in parallel:
+from CouDALFISh import log
 set_log_active(False)
 if (mpirank==0):
     set_log_active(True)
-logger = aledal.ConsoleLogger()
 
 # set compiler to TSFC
 parameters['form_compiler']['representation'] = 'tsfc'
@@ -100,7 +100,7 @@ fnameSuffix = ".dat"
 fnameCheck = fnamePrefix+"1"+fnameSuffix
 import os.path
 if(not os.path.isfile(fnameCheck)):
-    logger.error("Missing data files for shell structure geometry. "
+    error("Missing data files for shell structure geometry. "
             +"Please refer to the docstring at the top of this script.")
 
 Nel_f_vert = int(args.Nel_f_vert)
@@ -142,7 +142,7 @@ penalty = C_pen*float(mu)/h_f # DAL penalty
 
 ####### Read in structure mesh and generate extracted spline #######
 
-logger.log("Generating extraction data...")
+log("Generating extraction data...")
     
 # Load a control mesh from several files in a legacy ASCII format; must use
 # triangles for evaluation of tip displacement.
@@ -171,7 +171,7 @@ for patch in range(0,2):
         field = 2
         splineGenerator.addZeroDofs(field,sideDofs)
                     
-logger.log("Creating extracted spline...")
+log("Creating extracted spline...")
 
 # Quadrature degree for the analysis:
 QUAD_DEG = 4
@@ -190,7 +190,7 @@ mesh = BoxMesh(worldcomm,
 # which leads to symmetric results in the valve displacement
 # without this, the valve response is highly asymetric
 mesh = refine(mesh)
-V_f = alevms.equalOrderSpace(mesh)
+V_f = vrmt.equalOrderSpace(mesh)
 Vscalar = FunctionSpace(mesh,"Lagrange",1)
 x_f = SpatialCoordinate(mesh)
 
@@ -213,11 +213,13 @@ ahat_real_old = Function(V_m)
 uhat_real_old.assign(project(uhat,V_m,solver_type='gmres'))
 vhat_real_old.assign(project(vhat,V_m,solver_type='gmres'))
 ahat_real_old.assign(project(ahat,V_m,solver_type='gmres'))
-timeInt_m = GeneralizedAlphaIntegrator(rho_infty,Dt,uhat_real,(uhat_real_old,vhat_real_old,ahat_real_old))
+timeInt_m = GeneralizedAlphaIntegrator(rho_infty,Dt,uhat_real,
+                                       (uhat_real_old,vhat_real_old,
+                                        ahat_real_old))
 uhat_alpha = timeInt_m.x_alpha()
 vhat_alpha = timeInt_m.xdot_alpha()
 
-meshProblem = aledal.ExplicitMeshMotion(timeInt_m,uhat)
+meshProblem = cfsh.ExplicitMeshMotion(timeInt_m,uhat)
 
 
 ####### Boundary data #######
@@ -274,10 +276,10 @@ u_alpha = uPart(up_alpha)
 p_alpha = up_alpha[3]
 u_t_alpha = uPart(updot_alpha)
 cutFunc = Function(Vscalar)
-res_f = alevms.interiorResidual(u_alpha,p,v,q,rho,mu,mesh,
+res_f = vrmt.interiorResidual(u_alpha,p,v,q,rho,mu,mesh,
                                 uhat=uhat_alpha,vhat=vhat_alpha,
                                 v_t=u_t_alpha,Dt=Dt,dy=dx,
-                                stabScale=aledal.stabScale(cutFunc,stabEps))
+                                stabScale=cfsh.stabScale(cutFunc,stabEps))
 
 # Flag vertical sides for weakBCs:
 weakBCDomain = CompiledSubDomain("x[0]<0.0"+
@@ -286,7 +288,7 @@ weakBCIndicator = MeshFunction("size_t",mesh,mesh.topology().dim()-1,0)
 WEAK_BC_FLAG = 1
 ds = ds(subdomain_data=weakBCIndicator)
 weakBCDomain.mark(weakBCIndicator,WEAK_BC_FLAG)
-res_f += alevms.weakDirichletBC(u_alpha,p,v,q,v_BC,rho,mu,mesh,
+res_f += vrmt.weakDirichletBC(u_alpha,p,v,q,v_BC,rho,mu,mesh,
                                 uhat=uhat_alpha,
                                 vhat=vhat_alpha,
                                 ds=ds(WEAK_BC_FLAG))
@@ -296,14 +298,13 @@ bcs_f = [DirichletBC(V_f.sub(0).sub(d-1),Constant(0.0),
                      "x[2]<0.0 || x[2]>"+str(D)),]
 
 # Coupling with CouDALFISh:
-fsiProblem = aledal.CouDALFISh(mesh,res_f,timeInt_f,
+fsiProblem = cfsh.CouDALFISh(mesh,res_f,timeInt_f,
                                spline,res_sh,timeInt_sh,
                                penalty=penalty,
                                bcs_f=bcs_f,
                                blockItTol=blockItTol,
                                cutFunc=cutFunc,
                                meshProblem=meshProblem,
-                               logger=logger,
                                Dres_sh=derivative(res_sh,y_hom),
                                r=0.0)
 
@@ -338,20 +339,17 @@ outfile_fsm.parameters["functions_share_mesh"] = True
 outfile_fsm.parameters["rewrite_function_mesh"] = False
 
 # report size of problem
-logger.log("Fluid-Solid DOFs: "+str(V_f.dim()))
-logger.log("Shell FEM DOFs: "+str(spline.M.size(0)))
-logger.log("Shell IGA DOFs: "+str(spline.M.size(1)))
-logger.log("Shell Lagrange nodes: "+str(spline.V_control
-                                                .tabulate_dof_coordinates()
-                                                .shape[0]))
+log("Fluid-Solid DOFs: "+str(V_f.dim()))
+log("Shell FEM DOFs: "+str(spline.M.size(0)))
+log("Shell IGA DOFs: "+str(spline.M.size(1)))
+log("Shell Lagrange nodes: "+str(spline.V_control\
+                                 .tabulate_dof_coordinates().shape[0]))
 
 # Time stepping loop:
 t.assign(t+Dt)
 for timeStep in range(0,N_steps):
     
-    logger.log("------- Time step "
-                 +str(timeStep+1)+"/"
-                 +str(N_steps)+" -------")
+    log("\n"+18*"-"+" Time step "+str(timeStep+1)+"/"+str(N_steps)+" "+18*"-")
  
     # Output fields needed for visualization.
     if(timeStep % OUTPUT_SKIP == 0):
@@ -407,4 +405,4 @@ for timeStep in range(0,N_steps):
 
     # print timings
     if LOG_TIMINGS:
-        logger.log(timings(TimingClear.clear,[TimingType.wall]).str(True))
+        log(timings(TimingClear.clear,[TimingType.wall]).str(True))
