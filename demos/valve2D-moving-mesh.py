@@ -349,7 +349,7 @@ log("Shell Lagrange nodes: "+str(spline.V_control\
 t.assign(t+Dt)
 for timeStep in range(0,N_steps):
     
-    log("\n"+18*"-"+" Time step "+str(timeStep+1)+"/"+str(N_steps)+" "+18*"-")
+    log("\n"+18*"="+" Time step "+str(timeStep+1)+"/"+str(N_steps)+" "+18*"=")
  
     # Output fields needed for visualization.
     if(timeStep % OUTPUT_SKIP == 0):
