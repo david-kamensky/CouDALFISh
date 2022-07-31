@@ -200,11 +200,11 @@ class SolvedMeshMotion(KnownMeshMotion):
                 'linear_solver':'gmres',
                 'preconditioner':'jacobi',
                 'error_on_nonconvergence':False,
-                'maximum_iterations':100,
-                'relative_tolerance':1e-4,
+                'maximum_iterations':50,
+                'relative_tolerance':1e-6,
                 'krylov_solver':{'error_on_nonconvergence':False,
-                                'relative_tolerance':1e-6,
-                                'maximum_iterations':200}}}
+                                 'relative_tolerance':1e-6,
+                                 'maximum_iterations':300}}}
 
     def __init__(self,time_integrator,res,
                  bcs=[],Dres=None,u_s=None,bc_func=None,
@@ -219,10 +219,8 @@ class SolvedMeshMotion(KnownMeshMotion):
         projected into the mesh motion FunctionSpace and assigned to
         ``bc_func`` before solution or boundary condition enforcement occurs.
 
-        The ``linearSolver`` is used in a Newton iteration with a relative
-        tolerance convergence criteria of ``relTol``. The variable ``noError``
-        describes the behavior (error vs warning) when the `maxIters`` are
-        reached.
+        The ``solver_parameters`` for the nonlinear solver can be controlled
+        similarly to the parameters of a ``NonlinearVariationalSolver``.
         '''
         super().__init__(time_integrator)
         self.res = res
@@ -251,12 +249,13 @@ class SolvedMeshMotion(KnownMeshMotion):
                                         solver_type='gmres',
                                         preconditioner_type='jacobi'))
         # start the Newton iteration
-        begin("Mesh problem Newton iteration:")
+        log("+-----------------------------------------+")
+        log("|      Mesh problem Newton iteration      |")
+        log("+-----------------------------------------+")
         solve(self.res==0, self.time_integrator.x, bcs=self.bcs, J=self.Dres, 
               solver_parameters=self.solver_parameters)
         # update the time integrator with the new solution
         self.time_integrator.advance()
-        end()
 
 class CouDALFISh:
     """
@@ -453,7 +452,7 @@ class CouDALFISh:
             self.Vscalar_f = FunctionSpace(mesh_f,"CG",1)
             self.cutFunc = Function(self.Vscalar_f)
             warning("cutFunc not provided to CouDALFISh;\n"+
-                    "         will not be updated in residuals using it.")
+                    "       will not be updated in residuals using it.")
         else:
             self.cutFunc = cutFunc
             self.Vscalar_f = cutFunc.function_space()
@@ -473,15 +472,6 @@ class CouDALFISh:
 
         # manual shell pressure override
         self.shell_pressure = None
-
-        # shell residual file
-        self.write_shell_residual = False
-        if self.write_shell_residual:
-            srf = self.shell_residual_file
-            srf = XDMFFile("results-shell-residual/shell-residual.xdmf")
-            srf.parameters["flush_output"] = True
-            srf.parameters["functions_share_mesh"] = True
-            srf.parameters["rewrite_function_mesh"] = False
         
     def updateNodalNormals(self):
         """
@@ -741,7 +731,9 @@ class CouDALFISh:
         
     def takeStep(self):
         """
-        Advance the ``CouDALFISh`` by one time step.
+        Advance the ``CouDALFISh`` by one time step. Return the last residuals
+        for plotting in a list, first with the fluid, then the shell residuals
+        after that.
         """
         T_full = Timer("CFSH 00: full takeStep()")
         T_full.start()
@@ -779,8 +771,10 @@ class CouDALFISh:
         Fnorm_sh0 = -1.0
         Fnorm_f0 = -1.0
         for blockIt in range(0,self.blockIts+1):
-
-            begin(f"Block iteration {blockIt:02d}:")
+            
+            log("+------------------------------+")
+            log(f"|      Block iteration {blockIt:02d}      |")
+            log("+------------------------------+")
 
             with Timer("CFSH 01: assemble fluid material"):
                 # Assemble the fluid subproblem
@@ -984,7 +978,7 @@ class CouDALFISh:
             log(f"Shell residual (absolute): {Fnorm_sh:0.4e}")
             log(f"Fluid residual (absolute): {Fnorm_f:0.4e}")
             log(f"Shell residual (relative): {relNorm_sh:0.4e}")
-            log(f"Fluid residual (relative): {relNorm_sh:0.4e}")
+            log(f"Fluid residual (relative): {relNorm_f:0.4e}")
 
             # Solve for the nonlinear increment, and add it to the current
             # solution guess.  (Applies BCs)
@@ -1062,16 +1056,6 @@ class CouDALFISh:
         with Timer("CFSH 09: advance mesh problem"):
             self.meshProblem.compute_solution()
 
-        if self.write_shell_residual:
-            # save shell residual to a file
-            shell_residaul_func = Function(self.spline_shs[0].V)
-            self.spline_shs[0].M.mat().mult(MTF_sh, shell_residaul_func.\
-                                                    vector().vec())
-            shell_residaul_func.rename("res_sh","res_sh")
-            if mpirank==0:
-                self.shell_residual_file.write(shell_residaul_func,
-                                               self.timeInt_f.t)
-
         # update shell velocities
         ydotFuncs = [Function(spline.V) for spline in self.spline_shs]
         for i in range(self.num_splines):
@@ -1092,4 +1076,14 @@ class CouDALFISh:
         for i in range(self.num_splines):
             self.timeInt_shs[i].advance()
 
+        # stop timer
         T_full.stop()
+
+        # return residuals for plotting
+        residuals = []
+        residuals.append(Function(self.V_f,F_f))
+        for i in range(self.num_splines):
+            residuals.append(Function(self.spline_shs[i].V))
+            self.spline_shs[i].M.mat().mult(MTF_sh_list[i], residuals[i+1].\
+                                                    vector().vec())
+        return residuals
