@@ -326,7 +326,7 @@ def safe_filename(f):
 args = parser.parse_args()
 script_parameters_message = ''
 for s in sys.argv:
-    if s[0] is "-":     # a cheap check to find the arguments
+    if s[0]=="-":     # a cheap check to find the arguments
         script_parameters_message += "\n"
     script_parameters_message += s
     script_parameters_message += " "
