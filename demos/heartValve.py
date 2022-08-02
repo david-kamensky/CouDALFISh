@@ -6,7 +6,7 @@ may be downloaded from the following link:
   https://www.dropbox.com/s/ot5i568dw40h75c/leaflet-geometries.tgz?dl=1
 
 Extract this archive into the working directory in which you want to run this
-demo, using the command ``tar cvzf leaflet-geometries.tgz``.  
+demo, using the command ``tar vzf leaflet-geometries.tgz``.  
 
 Some notes:
 
