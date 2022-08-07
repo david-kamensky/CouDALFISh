@@ -1,0 +1,65 @@
+# This set of commands can be used to build a 
+# Singularity container for FEniCS on the Stampede2 
+# cluster at the Texas Advanced Computing Center 
+# (TACC). The FEniCS developers recommend building 
+# FEniCS from source on clusters, but this method 
+# guarantees functionality at a likely decrease in 
+# performance, expecially since the container 
+# environment will not be built against the 
+# HPC-optimized version of Python that TACC maintains.
+
+
+# start a 40-minute, single-node, single 
+# core development session on a compute node
+idev -N 1 -n 1 -m 40
+
+# change the working directory to the 
+# highest level so files are accessible on 
+# any TACC system and are not at risk of 
+# being purged
+cd $STOCKYWARD
+
+# make a directory to store the FEniCS 
+# image and enter it
+mkdir fenics-software
+cd fenics-software
+
+# load the Singularity module
+module load tacc-singularity
+
+# load the MPI environment for FEniCS
+module load mvapich2
+
+# view the currently-loaded modules
+module list
+
+# NOTE: depending on the current configuration 
+# of Stampede2 and the default standard libraries, 
+# more modules (or specific versions) may be 
+# needed. For example, at the time of writing, the 
+# "intel/19.1.1" module is also required. The 
+# command "module spider mvapich2" shows more 
+# information on what modules are required to load 
+# mvapich2.
+
+# build the Singularity image from the Docker 
+# distributions and save the resulting file 
+# to "fenics.sif"
+singularity build fenics.sif docker://quay.io/fenicsproject/stable:current
+
+# rename the local(outside of container) Python 
+# references prevent conflicts with Python references 
+# within the container (the correct ones for FEniCS)
+mv ~/.local ~/.local-temp-rename
+    
+# open an interactive Python session 
+singularity exec fenics.sif ipython
+
+# in IPython, test that FEniCS is accessible
+from dolfin import *
+
+# assuming an error-free import, close IPython
+exit
+
+# close the interactive compute job
+exit

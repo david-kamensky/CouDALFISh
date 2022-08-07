@@ -6,7 +6,7 @@ may be downloaded from the following link:
   https://www.dropbox.com/s/ot5i568dw40h75c/leaflet-geometries.tgz?dl=1
 
 Extract this archive into the working directory in which you want to run this
-demo, using the command ``tar cvzf leaflet-geometries.tgz``.  
+demo, using the command ``tar vzf leaflet-geometries.tgz``.  
 
 Some notes:
 
@@ -263,7 +263,7 @@ v,q = split(vq)
 up_t = timeInt_f.xdot_alpha()
 u_t = uPart(up_t)
 cutFunc = Function(Vscalar)
-res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,u_t=u_t,Dt=Dt,dx=dx,
+res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,v_t=u_t,Dt=Dt,dy=dx,
                          stabScale=stabScale(cutFunc,stabEps))
 n = FacetNormal(mesh)
 res_f += stableNeumannBC(inflowTraction,rho,u_alpha,v,n,

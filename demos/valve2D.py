@@ -234,7 +234,7 @@ p = up[3]
 u_t_alpha = uPart(updot_alpha)
 cutFunc = Function(Vscalar)
 res_f = interiorResidual(u_alpha,p,v,q,rho,mu,mesh,
-                         u_t=u_t_alpha,Dt=Dt,dx=dx,
+                         v_t=u_t_alpha,Dt=Dt,dy=dx,
                          stabScale=stabScale(cutFunc,stabEps))
 
 # Flag vertical sides for weakBCs:
