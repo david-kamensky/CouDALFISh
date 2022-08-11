@@ -924,7 +924,7 @@ def psi_el(E):
         return 0.5*LEAFLET['c0']*(tr(E)**2) + LEAFLET['c1']*(E**2)
 
     # anisotropic Lee-Sacks material
-    if LEAFLET['material']=='anisotropic-lee-sacks':
+    elif LEAFLET['material']=='anisotropic-lee-sacks':
         C = 2.0*E + Identity(3)
         I1 = tr(C)
         _,_,A2,_,_,_ = surfaceGeometry(spline,X)
