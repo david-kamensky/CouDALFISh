@@ -882,7 +882,7 @@ res_f += vrmt.stableNeumannBC(-Q*FLUID_NUMERICAL["R"]*n,FLUID["rho"],
                                 uhat=uhat_alpha,
                                 vhat=vhat_alpha,
                                 ds=ds(FLAG["fluid_outflow"]),
-                                gamma=FLUID_NUMERICAL["gamma"])
+                                gamma=Constant(0))
 
 ###############################################################
 #### Fluid-Solid Residual #####################################
