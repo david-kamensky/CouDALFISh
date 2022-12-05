@@ -498,7 +498,8 @@ class CouDALFISh:
         belongs to within global fluid-solid domain. Points that do not belong
         to an MPI rank have a value of -1.
         """
-        ranks = -1*np.ones([len(nodexs),len(nodexs[0])],dtype=int)
+        ranks = [-1*np.ones([len(nodexs_i)], dtype=int) 
+                 for nodexs_i in nodexs]
         for i in range(self.num_splines):
             for node in range(0,self.nNodes_shs[i]):
                 if self.pointInRank(nodexs[i][node]):
@@ -720,6 +721,23 @@ class CouDALFISh:
             self.lams[i] = load(f)
             f.close()
 
+            if self.nonmatching_sh is not None:
+                self.nonmatching_sh.spline_funcs[i].assign(self.y_old_homs[i])
+
+        if self.nonmatching_sh is not None:
+            # Update mortar meshes' functions
+            for i0 in range(len(self.nonmatching_sh.mortar_funcs)):
+                for i1 in range(len(self.nonmatching_sh.mortar_funcs[i0])):
+                    for i2 in range(len(self.nonmatching_sh.\
+                        mortar_funcs[i0][i1])):
+                        self.nonmatching_sh.transfer_matrices_list\
+                            [i0][i1][i2].mat().mult(
+                            self.nonmatching_sh.spline_funcs\
+                            [self.nonmatching_sh.mapping_list[i0][i1]].\
+                            vector().vec(), 
+                            self.nonmatching_sh.mortar_funcs[i0][i1][i2].\
+                            vector().vec())
+
         f = HDF5File(worldcomm, 
                      self.fluidRestartName(restartPath,timeStep),"r")
         f.read(self.up, "/up")
@@ -874,7 +892,7 @@ class CouDALFISh:
                                 if LOG_SHELL_RESIDUALS:
                                     contact_res_iga = norm(self.spline_shs[i]
                                                         .extractVector(
-                                                        PETScVector(Fcs_FE)))
+                                                        PETScVector(Fcs_FE[i])))
                                     log((f"Shell {i} contact  "
                                          f"residual (absolute): "
                                          f"{contact_res_iga:0.4e}"))
@@ -1029,7 +1047,7 @@ class CouDALFISh:
                                     [i][j][k].mat().mult(self.y_homs\
                                     [self.nonmatching_sh.mapping_list[i][j]].\
                                     vector().vec(), 
-                                    self.nonmatching_sh.mortar_vars[i][j][k].\
+                                    self.nonmatching_sh.mortar_funcs[i][j][k].\
                                     vector().vec())
             else:
                 self.spline_shs[0].M.mat().mult(dy, dyFunc.vector().vec())
