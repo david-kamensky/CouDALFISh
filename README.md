@@ -14,9 +14,17 @@ author = "D. Kamensky"
 ```
 It serves to illustrate advanced usage of tIGAr and FEniCS, and demonstrates that automated code generation can still be useful in development of custom applications where certain functionality is still implemented manually.
 
-The following paper further extends the capability of CouDALFISh to handle a deforming fluid domain:
+The following paper further extends CouDALFISh to handle a deforming fluid domain:
 ```
-@article{IN PREPARATION}
+@article{Neighbor2022,
+author={G. E. Neighbor and H. Zhao and M. Saraeian and M.-C. Hsu and D. Kamensky},
+title={Leveraging code generation for transparent immersogeometric fluid--structure interaction analysis on deforming domains},
+journal={Engineering with Computers},
+year={2022},
+month={Nov},
+day={16},
+issn={1435-5663}
+}
 ```
 
 CouDALFISh couples the fluid and structure subproblems using the DAL approach, as originally proposed (without a name) in Section 4 of
